@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.animation import FuncAnimation
 import matplotlib
-matplotlib.use('TkAgg')  # 使用TkAgg后端
+# matplotlib.use('TkAgg')  # 使用TkAgg后端
 
 class SimulationVisualizer:
     def __init__(self, environment, update_interval=1000):

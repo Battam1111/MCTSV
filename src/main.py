@@ -29,6 +29,7 @@ class SimulationManager:
         self.replay_buffer = ReplayBuffer(self.config["training"]["max_buffer"])  # 初始化经验回放缓冲区，容量可配置
         self.reward_normalizer = RewardNormalizer()  # 初始化奖励标准化器
         self.online_learning = online_learning
+        self.loss_save = 0
 
         if self.online_learning:
             self.optimizer = optim.Adam(self.mcts_vnet_model.parameters(), lr=self.config['training']["lr"])
@@ -38,7 +39,7 @@ class SimulationManager:
             self.entropy_coef = self.config['training']["entropy_coef"]  # 熵正则化系数
             self.clip_grad = self.config['training']["clip_grad"]  # 梯度裁剪阈值
 
-        # wandb.init(project="MCTSV-online_learning", config=self.config)
+        wandb.init(project="MCTSV-online_learning", config=self.config)
 
     def load_config(self, config_path):
         with open(config_path, 'r') as file:
@@ -101,7 +102,7 @@ class SimulationManager:
             self.update_model(experiences, episode=episode)
 
         if (episode + 1) % self.checkpoint_interval == 0:
-            self.save_model(episode, sum(episode_rewards))
+            self.save_model(episode, sum(episode_rewards), self.loss_save)
 
 
     def update_model(self, experiences, episode):
@@ -151,13 +152,14 @@ class SimulationManager:
         # torch.nn.utils.clip_grad_norm_(self.mcts_vnet_model.parameters(), self.clip_grad)
         self.optimizer.step()
 
+        self.loss_save = (policy_loss + value_loss).item()
 
         # 记录损失
-        # wandb.log({"loss": (policy_loss + value_loss).item(),
-        #             "value_loss": value_loss.item(),
-        #             "policy_loss": policy_loss.item(),
-        #             "episode": episode,
-        #             "reward": sum(rewards),})
+        wandb.log({"loss": (policy_loss + value_loss).item(),
+                    "value_loss": value_loss.item(),
+                    "policy_loss": policy_loss.item(),
+                    "episode": episode,
+                    "reward": sum(rewards),})
 
     def compute_gae(self, next_values, rewards, dones, values):
         gae = 0
