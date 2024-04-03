@@ -38,7 +38,7 @@ class MCTSVNet(nn.Module):
         combined_input = torch.cat((global_flow_flat, local_flow_flat), dim=1)
 
         # 在将combined_input传递给网络之前，增加一个批维度
-        combined_input = combined_input.unsqueeze(0)  # 这使combined_input成为2D输入
+        # combined_input = combined_input.unsqueeze(0)  # 这使combined_input成为2D输入
 
         x = self.shared_layers(combined_input)
 

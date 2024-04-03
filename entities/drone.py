@@ -46,6 +46,7 @@ class Drone:
             # Check if the new position is valid (within bounds and not an obstacle)
             if is_valid_position(new_position):
                 self.position = new_position
+                reward = calculate_reward('move_cost')
             else:
                 # If the new position is not valid, the drone stays in place and gets a penalty
                 reward = calculate_reward('invalid_move')

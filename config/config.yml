@@ -28,13 +28,16 @@ training:
   lr: 0.00001  # 学习率
   BATCH_SIZE: 128
   max_buffer: 10000
+  clip_grad: 0.5
 
 penalties_rewards:
   invalid_action_penalty: -10
   collision_penalty: -100
   target_reward: 100
   default_penalty: 1
+  default_battery_penalty: 1
   collect_info_cost: 1
+  move_cost: 1
 
 datasets:
   global_flow:

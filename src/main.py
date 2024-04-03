@@ -14,6 +14,7 @@ from models.local_flow_model import LocalFlowTransformer
 from utils.replay_buffer import ReplayBuffer
 from utils.reward_normalizer import RewardNormalizer
 
+
 # 将项目根目录添加到 sys.path 中
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -27,19 +28,17 @@ class SimulationManager:
         self.global_flow_model, self.local_flow_model, self.mcts_vnet_model = self.initialize_models()
         self.replay_buffer = ReplayBuffer(self.config["training"]["max_buffer"])  # 初始化经验回放缓冲区，容量可配置
         self.reward_normalizer = RewardNormalizer()  # 初始化奖励标准化器
-        if online_learning:
+        self.online_learning = online_learning
+
+        if self.online_learning:
             self.optimizer = optim.Adam(self.mcts_vnet_model.parameters(), lr=self.config['training']["lr"])
             self.checkpoint_interval = self.config['training']["checkpoint_interval"]
             self.gamma = self.config['training']["gamma"]  # 折扣因子
             self.lambda_gae = self.config['training']["lambda_gae"]  # GAE参数
             self.entropy_coef = self.config['training']["entropy_coef"]  # 熵正则化系数
-        else:
-            self.optimizer = None
-            self.checkpoint_interval = None
-            self.gamma = None
-            self.lambda_gae = None
-            self.entropy_coef = None
-        wandb.init(project="MCTSV-online_learning", config=self.config)
+            self.clip_grad = self.config['training']["clip_grad"]  # 梯度裁剪阈值
+
+        # wandb.init(project="MCTSV-online_learning", config=self.config)
 
     def load_config(self, config_path):
         with open(config_path, 'r') as file:
@@ -59,7 +58,9 @@ class SimulationManager:
 
     def simulate_interaction(self):
         for episode in range(self.num_episodes):
-            self.train_episode(episode)
+            if self.online_learning:
+                self.mcts_vnet_model.train()
+                self.train_episode(episode)
 
     def train_episode(self, episode):
         self.state = self.env.reset()
@@ -84,9 +85,11 @@ class SimulationManager:
             next_global_flow_output = self.global_flow_model(next_global_matrix)
             next_local_flow_output = self.local_flow_model(next_local_matrix)
 
+            # 奖励标准化
             normalized_reward = self.reward_normalizer.normalize(reward)
             episode_rewards.append(normalized_reward)
             
+            # 奖励重放机制
             self.replay_buffer.push((global_flow_output, local_flow_output), action.item(), normalized_reward, (next_global_flow_output, next_local_flow_output), done)
 
             self.state = next_state
@@ -108,24 +111,26 @@ class SimulationManager:
         global_states, local_states = zip(*states)
         global_next_states, local_next_states = zip(*next_states)
 
-        # 将每个states部分转换为合适的torch tensors并移至设备
-        global_states = torch.stack(global_states).to(self.device)
-        local_states = torch.stack(local_states).to(self.device)
-        global_next_states = torch.stack(global_next_states).to(self.device)
-        local_next_states = torch.stack(local_next_states).to(self.device)
+        # 将每个states部分转换为合适的torch tensors并移至设备，分离计算图
+        global_states = torch.stack(global_states).to(self.device).detach()
+        local_states = torch.stack(local_states).to(self.device).detach()
+        global_next_states = torch.stack(global_next_states).to(self.device).detach()
+        local_next_states = torch.stack(local_next_states).to(self.device).detach()
 
-        actions = torch.tensor(actions, dtype=torch.long).view(-1, 1).to(self.device)
-        rewards = torch.tensor(rewards, dtype=torch.float).to(self.device)
-        dones = torch.tensor(dones, dtype=torch.float).to(self.device)
+        # 分离计算图
+        actions = torch.tensor(actions, dtype=torch.long).view(-1, 1).to(self.device).detach()
+        rewards = torch.tensor(rewards, dtype=torch.float).to(self.device).detach()
+        dones = torch.tensor(dones, dtype=torch.float).to(self.device).detach()
 
         # 对当前状态和下一个状态使用模型进行预测
         # 注意这里需要将global和local部分分别输入模型
         policy, current_values = self.mcts_vnet_model(global_states, local_states)
         next_policy, next_values = self.mcts_vnet_model(global_next_states, local_next_states)
-        next_values = next_values.detach()
 
-        # 假设policy的形状是[1, 128, 9]
-        # 移除不必要的批次维度，使其变为[128, 9]
+        # 分离计算图
+        current_values = current_values.detach()
+        next_values = next_values.detach()
+        
         policy = policy.squeeze(0)  # 移除第0维，因为它的大小为1
         next_policy = next_policy.squeeze(0)
 
@@ -139,17 +144,20 @@ class SimulationManager:
 
         # 更新模型
         self.optimizer.zero_grad()
+
         (policy_loss + value_loss).backward()
-        torch.nn.utils.clip_grad_norm_(self.mcts_vnet_model.parameters(), 0.5)
+
+        # 梯度裁剪
+        # torch.nn.utils.clip_grad_norm_(self.mcts_vnet_model.parameters(), self.clip_grad)
         self.optimizer.step()
 
 
         # 记录损失
-        wandb.log({"loss": (policy_loss + value_loss).item(),
-                    "value_loss": value_loss.item(),
-                    "policy_loss": policy_loss.item(),
-                    "episode": episode,
-                    "reward": sum(rewards),})
+        # wandb.log({"loss": (policy_loss + value_loss).item(),
+        #             "value_loss": value_loss.item(),
+        #             "policy_loss": policy_loss.item(),
+        #             "episode": episode,
+        #             "reward": sum(rewards),})
 
     def compute_gae(self, next_values, rewards, dones, values):
         gae = 0

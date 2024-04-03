@@ -23,12 +23,12 @@ class Environment:
         self.done = False
         self.drone = Drone(self.config)  # 创建 Drone 实例
         self.data_collector = DataCollector()
-        # self.mcts_path = self.config['datasets']["mcts"]["data_dir"]
         self.is_simulated = False
+        self.num_signal_points = 0
+        self.num_obstacles = 0
 
     def set_state(self, state):
         self.state = state
-        # print(self.state)
         self.drone_position = state['drone_position']
         self.drone.battery = state['battery']
 
@@ -111,7 +111,10 @@ class Environment:
 
         # Randomly generate the number of signal points and obstacles
         num_signal_points = np.random.randint(min_num_signal_points, max_num_signal_points + 1)
+        self.num_signal_points = num_signal_points
+
         num_obstacles = np.random.randint(min_num_obstacles, max_num_obstacles + 1)
+        self.num_obstacles = num_obstacles
 
         # Randomly generate positions for signal points and obstacles
         # Ensure that they do not overlap
@@ -132,7 +135,6 @@ class Environment:
     def _is_valid_position(self, position):
     # Check if the position is within the bounds and not on an obstacle
         x, y = position
-        # print(x,y)
         if 0 <= x < self.config['environment']['size'] and 0 <= y < self.config['environment']['size']:
             return self.state['global_matrix'][x, y] != -1  # Not an obstacle
         return False
@@ -144,8 +146,8 @@ class Environment:
 
     def _update_state(self):
 
-        # 每次动作都消耗电池
-        self.drone.battery -= self.config['penalties_rewards']["default_penalty"]
+        # 随着时间耗电
+        self.drone.battery -= self.config['penalties_rewards']["default_battery_penalty"]
         self.state["battery"] = self.drone.battery
         
         # 更新局部矩阵，如果有必要的话
@@ -158,15 +160,21 @@ class Environment:
     def _calculate_reward(self, action_result):
         # Define the rewards for different action results
         rewards = {
-            'collect_success': self.config['penalties_rewards']["target_reward"],  # Reward for successfully collecting an information point
-            'collect_fail': self.config['penalties_rewards']["invalid_action_penalty"],     # Penalty for failing to collect an information point
-            'invalid_move': self.config['penalties_rewards']["invalid_action_penalty"]      # Penalty for an invalid move
+            'collect_success': self.config['penalties_rewards']["target_reward"] + self.config['penalties_rewards']["default_penalty"],  # Reward for successfully collecting an information point
+            'collect_fail': self.config['penalties_rewards']["invalid_action_penalty"] + self.config['penalties_rewards']["default_penalty"],     # Penalty for failing to collect an information point
+            'invalid_move': self.config['penalties_rewards']["invalid_action_penalty"] + self.config['penalties_rewards']["default_penalty"],      # Penalty for an invalid move
+            'valid_move': self.config['penalties_rewards']["default_penalty"]               # Penalty for a valid move
         }
+
+        # 简易版本的信号点计算
+        if action_result == 'collect_success':
+            self.num_signal_points -= 1
+
         return rewards.get(action_result, 0)
 
     def _check_done(self):
         # Check if the drone's battery is depleted
-        if self.drone.battery <= 0:
+        if self.drone.battery <= 0 or self.num_signal_points == 0:
             # self.data_collector.save_data(self.mcts_path)
             self.done = True
 
