@@ -1,4 +1,3 @@
-```markdown
 # MCTSVNet Project
 
 ## 项目概述
@@ -15,9 +14,8 @@ MCTSVNet是一个使用蒙特卡洛树搜索（MCTS）增强的深度学习网�
 ## 安装指南
 
 首先，克隆仓库到本地：
-
-```bash
-git clone <repository-url>
+```
+git clone https://github.com/Battam1111/MCTSV.git
 cd MCTSVNet
 ```
 
