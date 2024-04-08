@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from torch.distributions import Categorical
 
 class Drone:
     def __init__(self, config, mcts_vnet_model=None):
@@ -7,7 +8,7 @@ class Drone:
         self.position = None
         self.battery = config['drone']['battery']
         self.max_collect_range = config['drone']['max_collect_range']
-        self.available_actions = self._generate_available_actions()
+        self.available_actions = self._generate_available_actions()[0]
         self.mcts_vnet_model = mcts_vnet_model  # 将 MCTSVNet 模型传入无人机类
 
     def reset(self, is_valid_position):
@@ -32,49 +33,42 @@ class Drone:
                     return (x, y)
 
     def update_position(self, action, state, is_valid_position, calculate_reward):
-        # Extract the current position and the action details
         current_position = self.position
         action_type, action_value = action
-
-        # Initialize the reward
-        reward = 0
 
         # Handle the move action
         if action_type == 'move':
             new_position = (current_position[0] + action_value[0], current_position[1] + action_value[1])
-
-            # Check if the new position is valid (within bounds and not an obstacle)
             if is_valid_position(new_position):
                 self.position = new_position
-                reward = calculate_reward('move_cost')
+                # Assume moving costs battery life; adjust the cost accordingly
+                self.battery -= self.config['penalties_rewards']["move_cost"]
+                reward = calculate_reward('valid_move')
             else:
-                # If the new position is not valid, the drone stays in place and gets a penalty
                 reward = calculate_reward('invalid_move')
 
         # Handle the collect action
         elif action_type == 'collect':
-            max_collect_range = self.config['drone']['max_collect_range']
             collected = False
-
-            # Check if there is an information point within the collection range
+            max_collect_range = self.config['drone']['max_collect_range']
+            
             for dx in range(-max_collect_range, max_collect_range + 1):
                 for dy in range(-max_collect_range, max_collect_range + 1):
                     check_position = (current_position[0] + dx, current_position[1] + dy)
                     if is_valid_position(check_position) and state['global_matrix'][check_position[0], check_position[1]] == 1:
-                        # Collect the information point
                         state['global_matrix'][check_position[0], check_position[1]] = 0
                         self.battery -= self.config['penalties_rewards']["collect_info_cost"]
                         collected = True
+                        # Update the collected points counter if available
+                        state['collected_points'] = state.get('collected_points', 0) + 1
                         break
                 if collected:
                     break
 
-            if collected:
-                reward = calculate_reward('collect_success')
-            else:
-                reward = calculate_reward('collect_fail')
+            reward = calculate_reward('collect_success') if collected else calculate_reward('collect_fail')
 
         return reward
+
 
     def get_local_matrix(self, state, perception_range):
         # 使用正确的属性和参数
@@ -103,14 +97,21 @@ class Drone:
         max_speed = self.config['drone']['max_speed']
         # 生成所有可能的移动动作，考虑最大速度限制
         moves = [(dx, dy) for dx in range(-max_speed, max_speed + 1) for dy in range(-max_speed, max_speed + 1) if (dx, dy) != (0, 0)]
-        return [('move', move) for move in moves] + [('collect', None)]
+        actions = [('move', move) for move in moves] + [('collect', None)]
+        num_action = len([('move', move) for move in moves] + [('collect', None)])
+        return actions, num_action
 
 
-    def sample_action(self, global_flow_output, local_flow_output):
+    def sample_action(self, global_flow_output, local_flow_output, is_greed=True):
 
         # 根据全局流和局部流模型的输出选择动作
         policy_output, _ = self.mcts_vnet_model(global_flow_output, local_flow_output)  # 忽略价值输出
-        policy_output_np = policy_output.detach().cpu().numpy()  # 转换为NumPy数组，确保操作在CPU上进行
-        action_index = np.argmax(policy_output_np)  # 选择概率最高的动作
-        return self.available_actions[action_index]
+        if is_greed:
+            policy_output_np = policy_output.detach().cpu().numpy()  # 转换为NumPy数组，确保操作在CPU上进行
+            action = np.argmax(policy_output_np)  # 选择概率最高的动作
+            return action
+        else:
+            action_dist = Categorical(policy_output)
+            action = action_dist.sample()
+            return action
 

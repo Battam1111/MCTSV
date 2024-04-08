@@ -2,53 +2,66 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class ResidualBlock(nn.Module):
+    def __init__(self, input_dim, output_dim, dropout_rate=0.5):
+        super(ResidualBlock, self).__init__()
+        self.linear1 = nn.Linear(input_dim, output_dim)
+        self.norm1 = nn.LayerNorm(output_dim)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.linear2 = nn.Linear(output_dim, output_dim)
+        self.norm2 = nn.LayerNorm(output_dim)
+
+        self.shortcut = nn.Linear(input_dim, output_dim) if input_dim != output_dim else nn.Identity()
+
+    def forward(self, x):
+        residual = self.shortcut(x)
+        out = F.relu(self.norm1(self.linear1(x)))
+        out = self.dropout(out)
+        out = self.norm2(self.linear2(out))
+        out += residual
+        out = F.relu(out)
+        return out
+
 class MCTSVNet(nn.Module):
     def __init__(self, config):
         super(MCTSVNet, self).__init__()
-        self.available_actions = config["available_actions"]
+        self.config = config
+        dim_observation = config["environment_size"] ** 2
+        dim_action = config["available_actions"]
+        hidden_dims = config["hidden_layers"]
+        dropout_rate = config["dropout"]
+
+        # 残差块处理全局观察和局部观察的组合
+        input_dim = dim_observation + (2*config["perception_range"]+1)**2
+        self.encoder = nn.Sequential(
+            ResidualBlock(input_dim, hidden_dims[0], dropout_rate),
+            *[ResidualBlock(hidden_dims[i], hidden_dims[i+1], dropout_rate) for i in range(len(hidden_dims)-1)]
+        )
         
-        # 假设 global_flow_output 和 local_flow_output 的大小分别是 [10, 10] 和 [5, 5]
-        global_input_dim = config["environment_size"]**2  # 因为 [10, 10] 的矩阵被平铺后的大小
-        local_input_dim = (2*config["perception_range"]+1)**2  # 因为 [5, 5] 的矩阵被平铺后的大小
-        total_input_dim = global_input_dim + local_input_dim  # 融合后的总输入维度
-
-        layers = []
-
-        # 使用融合后的输入维度作为第一层的输入
-        input_dim = total_input_dim
-        hidden_layers = config["hidden_layers"]
-        dropout_rate = config.get("dropout", 0.5)
-
-        # 构建隐藏层
-        for hidden_dim in hidden_layers:
-            layers.append(nn.Linear(input_dim, hidden_dim))
-            layers.append(nn.LayerNorm(hidden_dim))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout_rate))
-            input_dim = hidden_dim
-
-        self.shared_layers = nn.Sequential(*layers)
+        # 动作生成头
+        self.actor_head = nn.Sequential(
+            nn.Linear(hidden_dims[-1], dim_action),
+            nn.Tanh()
+        )
         
-        self.policy_head = nn.Linear(input_dim, self.available_actions)
-        self.value_head = nn.Linear(input_dim, 1)
+        # 价值评估头
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_dims[-1], 1)
+        )
 
     def forward(self, global_flow_output, local_flow_output):
-        global_flow_flat = global_flow_output.view(global_flow_output.size(0), -1)
-        local_flow_flat = local_flow_output.view(local_flow_output.size(0), -1)
-        combined_input = torch.cat((global_flow_flat, local_flow_flat), dim=1)
+        # 合并全局观察和局部观察
+        combined_input = torch.cat((global_flow_output.view(global_flow_output.size(0), -1), 
+                                     local_flow_output.view(local_flow_output.size(0), -1)), dim=1)
 
-        # 在将combined_input传递给网络之前，增加一个批维度
-        # combined_input = combined_input.unsqueeze(0)  # 这使combined_input成为2D输入
+        # 通过残差块编码器
+        x = self.encoder(combined_input)
 
-        x = self.shared_layers(combined_input)
-
-        policy = F.softmax(self.policy_head(x), dim=1)  # 注意调整softmax的dim参数为1
+        # 生成动作和价值
+        policy = F.softmax(self.actor_head(x), dim=1)
         value = self.value_head(x)
 
         return policy, value
-
-
-
 
 if __name__ == '__main__':
     # 示例配置参数

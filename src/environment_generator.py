@@ -17,7 +17,8 @@ class Environment:
         with open(config_path, 'r') as file:
             self.config = yaml.safe_load(file)
 
-        self.mcts = MCTS(self, num_simulations=0)
+        self.mcts = MCTS(self, num_simulations=self.config['mcts']['num_simulations'])
+        self.online_learning = self.config["training"]["online_learning"]
         self.state = None
         self.reward = 0
         self.done = False
@@ -26,6 +27,10 @@ class Environment:
         self.is_simulated = False
         self.num_signal_points = 0
         self.num_obstacles = 0
+        self.episode_count = 0
+        self.initial_environment = self._generate_initial_environment()  # 初始环境的副本
+        self.max_num_signal_points = 0
+
 
     def set_state(self, state):
         self.state = state
@@ -33,27 +38,43 @@ class Environment:
         self.drone.battery = state['battery']
 
     def reset(self):
-        environment = self._generate_initial_environment()
-        if self.state is None:
+        if self.online_learning:
+            # 在线学习时，基于episode_count调整环境
+            if self.episode_count % self.config['environment']['reset_interval'] == 0:
+                # 周期性重置环境
+                self.initial_environment = self._generate_initial_environment()
+            elif self.episode_count % self.config['environment']['adjust_interval'] == 0:
+                # 微调环境
+                self.micro_adjust_environment()
             self.state = {
-                'global_matrix': environment,
+                'global_matrix': copy.deepcopy(self.initial_environment),
                 'drone_position': None,
                 'local_matrix': None,
-                'battery': None
+                'battery': None,
+                'collected_points': 0
             }
-        self.drone.reset(self._is_valid_position)  # 重置无人机状态
+            self.num_signal_points = np.sum(self.state['global_matrix'] == 1)
+        else:
+            environment = self._generate_initial_environment()
+            if self.state is None:
+                self.state = {
+                    'global_matrix': environment,
+                    'drone_position': None,
+                    'local_matrix': None,
+                    'battery': None,
+                    'collected_points': 0
+                }
+            
+        # 共用的重置逻辑
+        self.drone.reset(self._is_valid_position)
         self.reward = 0
         self.done = False
         self.data_collector.reset()
-
-        # 构建初始状态字典
-        self.state = {
-            'global_matrix': environment,
-            'drone_position': self.drone.position,
-            'local_matrix': self._get_local_matrix(),
-            'battery': self.drone.battery
-        }
-
+        self.state['drone_position'] = self.drone.position
+        self.state['local_matrix'] = self._get_local_matrix()
+        self.state['battery'] = self.drone.battery
+        self.episode_count += 1
+        
         return self.state
 
     def run_simulation_animation(self):
@@ -61,18 +82,16 @@ class Environment:
         self.visualizer.start_animation()
 
     def step(self, global_flow_model, local_flow_model, action=None, use_mcts=False, is_simulated=False, use_mcts_to_train=False):
-        
-        # 在线学习时
-        action_index = action
-        action = self.drone.available_actions[action_index]
-
         if self.done:
             # 如果环境已完成，直接返回当前状态、奖励和完成标志
             return self.state, self.reward, self.done
 
-        if use_mcts:
+        if use_mcts and not is_simulated:
             # 使用 MCTS 算法来获取最佳动作
-            action = self.mcts.search(global_flow_model, local_flow_model)
+            action = self.mcts.search(self.state, global_flow_model, local_flow_model)
+
+        if type(action) != tuple:
+            action = self.drone.available_actions[action]
 
         # 执行动作并更新环境状态
         self._update_drone_position(action)
@@ -84,7 +103,8 @@ class Environment:
             'global_matrix': self.state['global_matrix'],
             'drone_position': self.drone.position,
             'local_matrix': self.state['local_matrix'],
-            'battery': self.drone.battery
+            'battery': self.drone.battery,
+            'collected_points': self.state['collected_points']
         }
 
         # 使用 MCTS 模拟从当前状态出发的一系列动作，并获取累积回报，当已经在模拟时则跳过
@@ -99,36 +119,87 @@ class Environment:
 
         return state_dict, self.reward, self.done
 
+    def micro_adjust_environment(self):
+        size = self.config['environment']['size']
+        adjustment_factor = self.config['environment']['adjustment_factor']  # 微调的比例因子
+        
+        # 创建环境的深拷贝，以避免在原始环境上直接修改
+        temp_environment = copy.deepcopy(self.initial_environment)
+        
+        # 计算需要调整的信号点和障碍物数量
+        num_adjustments = max(1, int((self.num_signal_points + self.num_obstacles) * adjustment_factor))
+        
+        # 随机选择信号点和障碍物进行移动
+        for _ in range(num_adjustments):
+            # 重新随机选择一个点直到这个点是信号点或障碍物
+            while True:
+                old_position = tuple(np.random.randint(0, size, 2))
+                if temp_environment[old_position[0], old_position[1]] != 0:
+                    break
+            
+            # 寻找新位置
+            while True:
+                new_position = tuple(np.random.randint(0, size, 2))
+                # 确保新位置不与其他信号点或障碍物重叠
+                if temp_environment[new_position[0], new_position[1]] == 0:
+                    # 将信号点或障碍物移动到新位置
+                    temp_environment[new_position[0], new_position[1]] = temp_environment[old_position[0], old_position[1]]
+                    temp_environment[old_position[0], old_position[1]] = 0
+                    break
+        
+        # 随机添加或删除信号点/障碍物
+        if np.random.rand() < 0.5:  # 50%的概率进行添加或删除操作
+            modify_type = np.random.choice([-1, 1])  # 随机选择添加信号点(1)或添加障碍物(-1)
+            modify_position = tuple(np.random.randint(0, size, 2))
+            # 只有在选中的位置为空时才进行添加
+            if temp_environment[modify_position[0], modify_position[1]] == 0:
+                temp_environment[modify_position[0], modify_position[1]] = modify_type
+            elif modify_type == temp_environment[modify_position[0], modify_position[1]]:
+                # 如果随机选择的位置已经是对应类型，则尝试删除
+                temp_environment[modify_position[0], modify_position[1]] = 0
+
+        # 更新初始环境
+        self.initial_environment = temp_environment
+        self.num_signal_points = np.sum(temp_environment == 1)
+
     def _generate_initial_environment(self):
         size = self.config['environment']['size']
-        max_num_signal_points = self.config['environment']['max_num_signal_points']
-        max_num_obstacles = self.config['environment']['max_num_obstacles']
+        complexity_factor = min(1.0, (self.episode_count / self.config['environment']['complexity_interval'])) if self.online_learning else 1.0
+        
+        # 保持最小值不变，只对最大值应用复杂度因子
         min_num_signal_points = self.config['environment']['min_num_signal_points']
         min_num_obstacles = self.config['environment']['min_num_obstacles']
+        # 应用复杂度因子后确保最大值不小于最小值
+        max_num_signal_points = max(min_num_signal_points, int(self.config['environment']['max_num_signal_points'] * complexity_factor))
+        max_num_obstacles = max(min_num_obstacles, int(self.config['environment']['max_num_obstacles'] * complexity_factor))
 
-        # Initialize the environment with all zeros
         environment = np.zeros((size, size))
-
-        # Randomly generate the number of signal points and obstacles
         num_signal_points = np.random.randint(min_num_signal_points, max_num_signal_points + 1)
-        self.num_signal_points = num_signal_points
-
         num_obstacles = np.random.randint(min_num_obstacles, max_num_obstacles + 1)
+        
+        self.num_signal_points = num_signal_points
+        self.max_num_signal_points = num_signal_points # 用于计算效率奖励
         self.num_obstacles = num_obstacles
 
-        # Randomly generate positions for signal points and obstacles
-        # Ensure that they do not overlap
         all_positions = set()
-        while len(all_positions) < num_signal_points + num_obstacles:
+        attempt_counter = 0
+        while len(all_positions) < num_signal_points + num_obstacles and attempt_counter < size ** 2:
             new_position = tuple(np.random.randint(0, size, 2))
-            all_positions.add(new_position)
+            if new_position not in all_positions:
+                all_positions.add(new_position)
+            attempt_counter += 1
 
-        # Assign signal points and obstacles to the environment
-        for i, position in enumerate(all_positions):
-            if i < num_signal_points:
-                environment[position] = 1  # Signal point
+        # 为了保证环境的初始化总是成功，我们在循环外再次检查数量并作出调整
+        for position in all_positions:
+            if num_signal_points > 0:
+                environment[position] = 1
+                num_signal_points -= 1
             else:
-                environment[position] = -1  # Obstacle
+                environment[position] = -1
+        
+        # 确保最终环境反映正确的信号点和障碍物数量
+        self.num_signal_points = np.sum(environment == 1)
+        self.num_obstacles = np.sum(environment == -1)
 
         return environment
                 
@@ -145,32 +216,35 @@ class Environment:
         self.reward += reward  # 更新累积奖励
 
     def _update_state(self):
-
-        # 随着时间耗电
-        self.drone.battery -= self.config['penalties_rewards']["default_battery_penalty"]
-        self.state["battery"] = self.drone.battery
+        
+        self.state['battery'] = self.drone.battery
         
         # 更新局部矩阵，如果有必要的话
         self.state['local_matrix'] = self._get_local_matrix()
+        self.num_signal_points = np.sum(self.state['global_matrix'] == 1)
 
     def _get_local_matrix(self):
         # 使用 Drone 类的方法来获取局部矩阵
         return self.drone.get_local_matrix(self.state, self.config['environment']['perception_range'])
 
+    def calculate_efficiency_reward(self):
+        # 根据剩余电量和收集到的信息点数量计算效率奖励
+        if self.state['collected_points'] == self.max_num_signal_points:
+            # 所有信息点都被收集时，给予额外奖励
+            return self.state['battery'] * self.config['penalties_rewards']['efficiency_multiplier']
+        return 0
+
     def _calculate_reward(self, action_result):
         # Define the rewards for different action results
         rewards = {
-            'collect_success': self.config['penalties_rewards']["target_reward"] + self.config['penalties_rewards']["default_penalty"],  # Reward for successfully collecting an information point
-            'collect_fail': self.config['penalties_rewards']["invalid_action_penalty"] + self.config['penalties_rewards']["default_penalty"],     # Penalty for failing to collect an information point
-            'invalid_move': self.config['penalties_rewards']["invalid_action_penalty"] + self.config['penalties_rewards']["default_penalty"],      # Penalty for an invalid move
-            'valid_move': self.config['penalties_rewards']["default_penalty"]               # Penalty for a valid move
+            'collect_success': self.config['penalties_rewards']["target_reward"],
+            'collect_fail': -self.config['penalties_rewards']["invalid_action_penalty"],
+            'invalid_move': -self.config['penalties_rewards']["collision_penalty"],
+            'valid_move': -self.config['penalties_rewards']["default_penalty"]
         }
-
-        # 简易版本的信号点计算
-        if action_result == 'collect_success':
-            self.num_signal_points -= 1
-
-        return rewards.get(action_result, 0)
+        reward = rewards.get(action_result, 0)
+        efficiency_reward = self.calculate_efficiency_reward()
+        return reward + efficiency_reward
 
     def _check_done(self):
         # Check if the drone's battery is depleted

@@ -12,34 +12,38 @@ from models.mcts_vnet_model import MCTSVNet
 from models.global_flow_model import GlobalFlowModel
 from models.local_flow_model import LocalFlowTransformer
 from utils.replay_buffer import ReplayBuffer
-from utils.reward_normalizer import RewardNormalizer
-
+from utils.normalizer import Normalizer
+from torch.optim import lr_scheduler
 
 # 将项目根目录添加到 sys.path 中
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 class SimulationManager:
-    def __init__(self, config_path, num_episodes, online_learning=False):
+    def __init__(self, config_path):
         self.config = self.load_config(config_path)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.num_episodes = num_episodes
-        self.online_learning = online_learning
+        self.num_episodes = self.config["training"]["episodes"]
+        self.online_learning = self.config["training"]["online_learning"]
         self.env = Environment(config_path)
         self.global_flow_model, self.local_flow_model, self.mcts_vnet_model = self.initialize_models()
+        # 传入MCTSV_NET
+        self.env.drone.mcts_vnet_model = self.mcts_vnet_model
         self.replay_buffer = ReplayBuffer(self.config["training"]["max_buffer"])  # 初始化经验回放缓冲区，容量可配置
-        self.reward_normalizer = RewardNormalizer()  # 初始化奖励标准化器
-        self.online_learning = online_learning
+        self.normalizer = Normalizer()  # 初始化奖励标准化器
         self.loss_save = 0
 
         if self.online_learning:
             self.optimizer = optim.Adam(self.mcts_vnet_model.parameters(), lr=self.config['training']["lr"])
+            # 初始化学习率调度器
+            # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=50, eta_min=0)
             self.checkpoint_interval = self.config['training']["checkpoint_interval"]
             self.gamma = self.config['training']["gamma"]  # 折扣因子
             self.lambda_gae = self.config['training']["lambda_gae"]  # GAE参数
             self.entropy_coef = self.config['training']["entropy_coef"]  # 熵正则化系数
             self.clip_grad = self.config['training']["clip_grad"]  # 梯度裁剪阈值
 
-        wandb.init(project="MCTSV-online_learning", config=self.config)
+        if self.config['training']['wandb']:
+            wandb.init(project="MCTSV-online_learning", config=self.config)
 
     def load_config(self, config_path):
         with open(config_path, 'r') as file:
@@ -66,9 +70,12 @@ class SimulationManager:
     def train_episode(self, episode):
         self.state = self.env.reset()
         self.done = False
+        step_count = 0
         episode_rewards = []
 
         while not self.done:
+            # self.env.run_simulation_animation()  # 运行画面模拟器（暂时存在一些问题）
+            
             global_matrix = torch.tensor(self.state['global_matrix'], dtype=torch.float).view(1, -1).to(self.device)
             local_matrix = torch.tensor(self.state['local_matrix'], dtype=torch.float).to(self.device)
 
@@ -87,7 +94,7 @@ class SimulationManager:
             next_local_flow_output = self.local_flow_model(next_local_matrix)
 
             # 奖励标准化
-            normalized_reward = self.reward_normalizer.normalize(reward)
+            normalized_reward = self.normalizer.normalize(reward)
             episode_rewards.append(normalized_reward)
             
             # 奖励重放机制
@@ -95,17 +102,18 @@ class SimulationManager:
 
             self.state = next_state
             self.done = done
+            step_count += 1
 
         # Sample experiences from the replay buffer to update the model
         if len(self.replay_buffer) >= self.config["training"]["BATCH_SIZE"]:
             experiences = self.replay_buffer.sample(self.config["training"]["BATCH_SIZE"])
-            self.update_model(experiences, episode=episode)
+            self.update_model(experiences, episode=episode, step_count=step_count)
 
         if (episode + 1) % self.checkpoint_interval == 0:
-            self.save_model(episode, sum(episode_rewards), self.loss_save)
+            self.save_model(episode, sum(episode_rewards)/step_count, self.loss_save)
 
 
-    def update_model(self, experiences, episode):
+    def update_model(self, experiences, episode, step_count):
         states, actions, rewards, next_states, dones = zip(*experiences)
 
         # 解包states和next_states，因为它们是由两个不同大小的tensor组成的元组
@@ -132,34 +140,45 @@ class SimulationManager:
         current_values = current_values.detach()
         next_values = next_values.detach()
         
+        # 价值标准化
+        current_values = self.normalizer.standardize(current_values)
+        next_values = self.normalizer.standardize(next_values)
+        
         policy = policy.squeeze(0)  # 移除第0维，因为它的大小为1
         next_policy = next_policy.squeeze(0)
 
         # GAE 计算
         returns, advantages = self.compute_gae(next_values, rewards, dones, current_values)
 
+        # 计算策略熵
+        policy_entropy = -(policy * policy.log()).sum(1).mean()
+
         # 计算损失函数
         action_probs = policy.gather(1, actions).squeeze()
         policy_loss = -(advantages.detach() * action_probs.log()).mean()
         value_loss = F.mse_loss(current_values.squeeze(), returns)
+        # 在总损失中加入熵正则化项，注意是减去熵正则化项（因为我们想最大化熵）
+        total_loss = policy_loss + value_loss - self.entropy_coef * policy_entropy
 
         # 更新模型
         self.optimizer.zero_grad()
-
-        (policy_loss + value_loss).backward()
-
+        total_loss.backward()
         # 梯度裁剪
-        # torch.nn.utils.clip_grad_norm_(self.mcts_vnet_model.parameters(), self.clip_grad)
+        torch.nn.utils.clip_grad_norm_(self.mcts_vnet_model.parameters(), self.clip_grad)
         self.optimizer.step()
+        # self.scheduler.step()
 
-        self.loss_save = (policy_loss + value_loss).item()
+        self.loss_save = total_loss.item()
 
-        # 记录损失
-        wandb.log({"loss": (policy_loss + value_loss).item(),
-                    "value_loss": value_loss.item(),
-                    "policy_loss": policy_loss.item(),
-                    "episode": episode,
-                    "reward": sum(rewards),})
+        print(f'sum(rewards):{sum(rewards)},step_count:{step_count},avg_r:{sum(rewards)/step_count}')
+
+        if self.config['training']['wandb']:
+            # 记录损失
+            wandb.log({"loss": self.loss_save,
+                        "value_loss": value_loss.item(),
+                        "policy_loss": policy_loss.item(),
+                        "episode": episode,
+                        "avg_reward": sum(rewards)/step_count,})
 
     def compute_gae(self, next_values, rewards, dones, values):
         gae = 0
@@ -181,14 +200,13 @@ class SimulationManager:
             advantages.insert(0, gae)
         return torch.tensor(returns, dtype=torch.float, device=self.device), torch.tensor(advantages, dtype=torch.float, device=self.device)
 
-    def save_model(self, episode, step_count, loss):
-        model_save_path = os.path.join(self.config['datasets']['mcts']['save_model_path'], f"mcts_vnet_episode{episode}_step{step_count}_loss{loss}.pt")
+    def save_model(self, episode, rewards, loss):
+        model_save_path = os.path.join(self.config['datasets']['mcts']['save_model_path'], f"mcts_vnet_episode{episode+1}_avgRewards{rewards}_loss{loss}.pt")
         os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
         torch.save(self.mcts_vnet_model.state_dict(), model_save_path)
         print(f"Model saved at {model_save_path}")
 
 if __name__ == "__main__":
     config_path = 'config/config.yml'
-    num_episodes = 100  # Or fetch from config
-    simulation_manager = SimulationManager(config_path, num_episodes, online_learning=True)
+    simulation_manager = SimulationManager(config_path)
     simulation_manager.simulate_interaction()
