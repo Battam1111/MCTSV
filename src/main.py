@@ -52,7 +52,9 @@ class SimulationManager:
 
     def initialize_models(self):
         global_flow_model = self.load_model(GlobalFlowModel(self.config['models']['global_flow_model']), self.config['datasets']['global_flow']['model_path'])
-        local_flow_model = self.load_model(LocalFlowTransformer(self.config['models']['local_flow_model']), self.config['datasets']['local_flow']['model_path'])
+        # local_flow_model = self.load_model(LocalFlowTransformer(self.config['models']['local_flow_model']), self.config['datasets']['local_flow']['model_path'])
+        # global_flow_model = None
+        local_flow_model = None
         mcts_vnet_model = self.load_model(MCTSVNet(self.config['models']['mcts_vnet_model']), self.config['datasets']['mcts']['model_path'])
         return global_flow_model, local_flow_model, mcts_vnet_model
 
@@ -77,10 +79,15 @@ class SimulationManager:
             # self.env.run_simulation_animation()  # 运行画面模拟器（暂时存在一些问题）
             
             global_matrix = torch.tensor(self.state['global_matrix'], dtype=torch.float).view(1, -1).to(self.device)
-            local_matrix = torch.tensor(self.state['local_matrix'], dtype=torch.float).to(self.device)
+            local_matrix = torch.tensor(self.state['local_matrix'], dtype=torch.float).view(1, -1).to(self.device)
 
-            global_flow_output, local_flow_output = self.global_flow_model(global_matrix), self.local_flow_model(local_matrix)
-            policy, _ = self.mcts_vnet_model(global_flow_output, local_flow_output)
+            # global_flow可能会有潜在的问题
+            global_flow_output = self.global_flow_model(global_matrix)
+            
+            # local_flow可能会有潜在的问题
+            # local_flow_output = self.local_flow_model(local_matrix)
+            
+            policy, _ = self.mcts_vnet_model(global_flow_output, local_matrix)
             action_dist = Categorical(policy)
             action = action_dist.sample()
 
@@ -88,17 +95,17 @@ class SimulationManager:
             
             # 下一状态（mctsv模型输入的处理）
             next_global_matrix = torch.tensor(next_state['global_matrix'], dtype=torch.float).view(1, -1).to(self.device)
-            next_local_matrix = torch.tensor(next_state['local_matrix'], dtype=torch.float).to(self.device)
+            next_local_matrix = torch.tensor(next_state['local_matrix'], dtype=torch.float).view(1, -1).to(self.device)
 
             next_global_flow_output = self.global_flow_model(next_global_matrix)
-            next_local_flow_output = self.local_flow_model(next_local_matrix)
+            # next_local_flow_output = self.local_flow_model(next_local_matrix)
 
             # 奖励标准化
             normalized_reward = self.normalizer.normalize(reward)
             episode_rewards.append(normalized_reward)
             
             # 奖励重放机制
-            self.replay_buffer.push((global_flow_output, local_flow_output), action.item(), normalized_reward, (next_global_flow_output, next_local_flow_output), done)
+            self.replay_buffer.push((global_flow_output, local_matrix), action.item(), normalized_reward, (next_global_flow_output, next_local_matrix), done)
 
             self.state = next_state
             self.done = done

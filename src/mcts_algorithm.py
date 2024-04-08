@@ -91,9 +91,9 @@ class MCTS:
             local_matrix = torch.tensor(current_env.state['local_matrix'], dtype=torch.float).to(self.device)
 
             global_flow_output = global_flow_model(global_matrix)
-            local_flow_output = local_flow_model(local_matrix)
+            # local_flow_output = local_flow_model(local_matrix)
 
-            action = current_env.drone.sample_action(global_flow_output, local_flow_output, is_greed=True)
+            action = current_env.drone.sample_action(global_flow_output, local_matrix, is_greed=True)
             # action = Categorical(action_probs).sample().item()
 
             _, reward, _ = current_env.step(action=action, global_flow_model=global_flow_model, local_flow_model=local_flow_model, is_simulated=True)

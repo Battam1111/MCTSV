@@ -81,8 +81,8 @@ def simulate_interaction(config_path, num_episodes, online_learning=False):
             global_matrix = torch.tensor(state['global_matrix'], dtype=torch.float).view(1, -1).to(device)
             local_matrix = torch.tensor(state['local_matrix'], dtype=torch.float).to(device)
 
-            global_flow_output = global_flow_model(global_matrix)
-            local_flow_output = local_flow_model(local_matrix)
+            # global_flow_output = global_flow_model(global_matrix)
+            # local_flow_output = local_flow_model(local_matrix)
 
             # 获取策略和价值
             mcts_vnet_model.train()
@@ -90,7 +90,7 @@ def simulate_interaction(config_path, num_episodes, online_learning=False):
             # policy, value = mcts_vnet_model(global_matrix, local_matrix)
 
             # 使用两个transformer流模型的输出作为输入
-            policy, value = mcts_vnet_model(global_flow_output, local_flow_output)
+            policy, value = mcts_vnet_model(global_matrix, local_matrix)
             action_dist = Categorical(policy)
 
             # 在线学习抽样动作训练

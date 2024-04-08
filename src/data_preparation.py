@@ -11,11 +11,11 @@ class GlobalFlowDataPreparer:
             self.config = yaml.safe_load(file)
     
     def generate_environment(self):
-        size = self.config['environment_size']
-        max_num_signal_points = self.config['num_signal_points']
-        max_num_obstacles = self.config['num_obstacles']
-        min_num_signal_points = self.config['min_num_signal_points']
-        min_num_obstacles = self.config['min_num_obstacles']
+        size = self.config['environment']['size']
+        max_num_signal_points = self.config['environment']['max_num_obstacles']
+        max_num_obstacles = self.config['environment']['max_num_obstacles']
+        min_num_signal_points = self.config['environment']['min_num_signal_points']
+        min_num_obstacles = self.config['environment']['min_num_obstacles']
 
         # 随机生成信号点和障碍物的数量
         num_signal_points = np.random.randint(min_num_signal_points, max_num_signal_points + 1)
@@ -36,9 +36,9 @@ class GlobalFlowDataPreparer:
 
     
     def value_function(self, signal_points, obstacle_points, position):
-        signal_weight = self.config['signal_weight']
-        obstacle_weight = self.config['obstacle_weight']
-        obstacle_penalty = self.config['obstacle_penalty']
+        signal_weight = self.config['environment']['signal_weight']
+        obstacle_weight = self.config['environment']['obstacle_weight']
+        obstacle_penalty = self.config['environment']['obstacle_penalty']
         
         # 确保position为二维向量以计算距离
         position = np.array(position)  # 确保position是数组格式
@@ -52,8 +52,8 @@ class GlobalFlowDataPreparer:
 
     
     def generate_value_matrix(self):
-        size = self.config['environment_size']
-        resolution = self.config['resolution']
+        size = self.config['environment']['size']
+        resolution = self.config['environment']['resolution']
         signal_points, obstacle_points = self.generate_environment()
         value_matrix = np.zeros((size, size))
         for i in range(size):
@@ -79,7 +79,7 @@ class GlobalFlowDataPreparer:
             signal_points, obstacle_points = self.generate_environment()
             value_matrix = self.generate_value_matrix()
             
-            environment_data = self.save_environment_to_json(signal_points, obstacle_points, self.config['environment_size'])
+            environment_data = self.save_environment_to_json(signal_points, obstacle_points, self.config['environment']['size'])
             value_matrix_data = self.save_value_matrix_to_csv(value_matrix)
             
             all_data[f'environment_{i}'] = {
@@ -210,7 +210,7 @@ class LocalFlowDataPreparer:
 
 if __name__ == '__main__':
     config_path = 'config/config.yml'
-    num_environments = 128  # 生成4个环境
+    num_environments = 8192  # 生成4个环境
     output_dir = 'data/processed'  # 确保这个目录存在或代码中创建它
 
     # 实例化GlobalFlowDataPreparer并生成环境
@@ -218,19 +218,17 @@ if __name__ == '__main__':
     output_file = os.path.join(output_dir, 'all_global_data.json')
     global_preparer.batch_generate_environments(num_environments, output_file)
 
-    all_environments_local_data = {}
+    # # 对于每个生成的环境，生成局部数据
+    # all_local_data = {}
+    # for i in range(num_environments):
+    #     # 实例化LocalFlowDataPreparer并生成局部数据
+    #     local_preparer = LocalFlowDataPreparer(output_file, config_path, i)
+    #     local_data = local_preparer.batch_generate_local_data()
+    #     all_local_data[f'environment_{i}'] = local_data
+    #     print(f'Completed environment {i}.')
 
-    # 对于每个生成的环境，生成局部数据
-    all_local_data = {}
-    for i in range(num_environments):
-        # 实例化LocalFlowDataPreparer并生成局部数据
-        local_preparer = LocalFlowDataPreparer(output_file, config_path, i)
-        local_data = local_preparer.batch_generate_local_data()
-        all_local_data[f'environment_{i}'] = local_data
-        print(f'Completed environment {i}.')
-
-    # 保存所有环境的局部数据到一个文件
-    all_local_data_file = os.path.join(output_dir, 'all_local_data.json')
-    with open(all_local_data_file, 'w') as f:
-        json.dump(all_local_data, f, indent=4)
-    print(f'All local data has been saved to {all_local_data_file}.')
+    # # 保存所有环境的局部数据到一个文件
+    # all_local_data_file = os.path.join(output_dir, 'all_local_data.json')
+    # with open(all_local_data_file, 'w') as f:
+    #     json.dump(all_local_data, f, indent=4)
+    # print(f'All local data has been saved to {all_local_data_file}.')

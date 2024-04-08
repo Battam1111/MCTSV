@@ -4,10 +4,17 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import os
 from torch.utils.data import random_split
+
+import sys
+
+# 将项目根目录添加到 sys.path 中
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 from models.global_flow_model import GlobalFlowModel
 from datasets.global_flow_dataset import GlobalFlowDataset
 import yaml
 import wandb
+
 
 def load_config(config_path="config/config.yml"):
     with open(config_path, 'r') as file:
@@ -76,7 +83,7 @@ def train_model(model, train_dataset, val_dataset, config):
 
 def main():
     config = load_config()
-    dataset = GlobalFlowDataset(config['global_flow_dataset']['data_file'], config['models']['global_flow_model'])
+    dataset = GlobalFlowDataset(config['datasets']['global_flow']['data_file'], config['models']['global_flow_model'])
     train_size = int(len(dataset) * 0.8)
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
