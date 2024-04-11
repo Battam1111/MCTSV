@@ -63,6 +63,18 @@ class Node:
         if self.visits == 0:
             return float('inf')  # 避免除以零
         return (self.value / self.visits) + c_param * np.sqrt((2 * np.log(self.parent.visits) / self.visits))
+    
+    def mark_for_recycling(self):
+        """
+        Marks this node and its subtree for recycling.
+        """
+        self.state = None
+        self.env = None
+        self.parent = None
+        self.action = None
+        self.children = None
+        self.action_values = None
+        self.untried_actions = None
 
 class MCTS:
     """
@@ -70,11 +82,13 @@ class MCTS:
     This implementation focuses on efficiency, readability, and flexibility.
     """
     
-    def __init__(self, environment, num_simulations, depth_threshold=10):
+    def __init__(self, environment, num_simulations, depth_threshold=10, recycling_threshold=1000):
         self.environment = environment
         self.num_simulations = num_simulations
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.depth_threshold = depth_threshold  # 深度阈值
+        self.recycling_threshold = recycling_threshold  # 节点回收阈值
+        self.recycling_counter = 0  # 回收计数器
         
     def adaptive_num_simulations(self, node):
         """
@@ -84,6 +98,25 @@ class MCTS:
         depth = self._get_depth(node)
         base_num_simulations = self.num_simulations
         return max(1, base_num_simulations - depth)
+    
+    def _recycle_nodes(self, node):
+        """
+        Recycles nodes in the subtree rooted at the given node.
+        """
+        if node is None:
+            return
+        for child in node.children:
+            self._recycle_nodes(child)
+        node.mark_for_recycling()
+        
+    def _manage_memory(self):
+        """
+        Manages memory by recycling nodes when the recycling threshold is reached.
+        """
+        self.recycling_counter += 1
+        if self.recycling_counter >= self.recycling_threshold:
+            self._recycle_nodes(self.root_node)
+            self.recycling_counter = 0
     
     def _get_depth(self, node):
         """
@@ -152,11 +185,11 @@ class MCTS:
         """
         Performs the MCTS search from the given state, using the specified models.
         """
-        root_node = Node(state, self.environment)
-        num_simulations = self.adaptive_num_simulations(root_node)
+        self.root_node = Node(state, self.environment)
+        num_simulations = self.adaptive_num_simulations(self.root_node)
         
         for _ in range(num_simulations):
-            node = root_node
+            node = self.root_node
             
             if node.depth >= self.depth_threshold:
                 break  # 如果节点深度超过阈值，则停止扩展
@@ -179,8 +212,10 @@ class MCTS:
             while node is not None:
                 node.update(reward)
                 node = node.parent
-        
-        return root_node.best_child().action if root_node.best_child() else None
+                
+        # 在搜索结束时，进行内存管理
+        self._manage_memory()
+        return self.root_node.best_child().action if self.root_node.best_child() else None
     
     def search(self, initial_state, global_flow_model, local_flow_model):
         """
