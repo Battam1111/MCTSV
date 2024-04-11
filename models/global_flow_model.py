@@ -30,7 +30,7 @@ class GlobalFlowModel(nn.Module):
     def forward(self, x):
         # 输入 x 的形状应为 (batch_size, seq_length, feature_size)
         # print(x.shape)
-        x = self.input_linear(x)
+        x = self.input_linear(x.view(1, -1))
         # print(x.shape)
         x = self.transformer_encoder(x)
         # print(x.shape)

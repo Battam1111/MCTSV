@@ -1,3 +1,4 @@
+import random
 import numpy as np
 import torch
 from torch.distributions import Categorical
@@ -10,6 +11,25 @@ class Drone:
         self.max_collect_range = config['drone']['max_collect_range']
         self.available_actions = self._generate_available_actions()[0]
         self.mcts_vnet_model = mcts_vnet_model  # 将 MCTSVNet 模型传入无人机类
+        self.online_learning = self.config["training"]["online_learning"]
+        self.online_train_seed = self.config["environment"]["online_train_seed"]
+        self.test_seed = self.config["environment"]["test_seed"]
+        
+        if self.online_learning:
+            # 设置NumPy的随机种子
+            np.random.seed(self.online_train_seed)
+            # 设置Python标准库随机模块的种子
+            random.seed(self.online_train_seed)
+            torch.manual_seed(self.online_train_seed)
+            torch.cuda.manual_seed_all(self.online_train_seed)  # 如果使用多个CUDA设备
+
+        else:
+            # 设置NumPy的随机种子
+            np.random.seed(self.test_seed)
+            # 设置Python标准库随机模块的种子
+            random.seed(self.test_seed)
+            torch.manual_seed(self.online_train_seed)
+            torch.cuda.manual_seed_all(self.online_train_seed)  # 如果使用多个CUDA设备
 
     def reset(self, is_valid_position):
         self.position = self._find_initial_position(is_valid_position)
@@ -17,8 +37,8 @@ class Drone:
 
     def _find_initial_position(self, is_valid_position):
     # Check if the initial position is specified in the config
-        if 'drone_initial_position' in self.config:
-            initial_position = self.config['drone_initial_position']
+        initial_position = self.config['drone'].get('initial_position', None)
+        if initial_position is not None:
             # Validate the initial position
             if is_valid_position(initial_position):
                 return initial_position
@@ -75,8 +95,8 @@ class Drone:
         matrix_size = 2 * perception_range + 1
         drone_position = np.array(self.position, dtype=int)
 
-        # 初始化局部矩阵
-        local_matrix = np.zeros((matrix_size, matrix_size))
+        # 初始化局部矩阵为 -1
+        local_matrix = np.full((matrix_size, matrix_size), -1)
 
         # 计算局部矩阵的边界
         min_x = max(0, drone_position[0] - perception_range)
@@ -92,6 +112,7 @@ class Drone:
                 local_matrix[local_x, local_y] = state['global_matrix'][x, y]
 
         return local_matrix
+
 
     def _generate_available_actions(self):
         max_speed = self.config['drone']['max_speed']

@@ -1,5 +1,7 @@
 import copy
+import random
 import numpy as np
+import torch
 import yaml
 import sys
 import os
@@ -19,8 +21,11 @@ class Environment:
 
         self.mcts = MCTS(self, num_simulations=self.config['mcts']['num_simulations'])
         self.online_learning = self.config["training"]["online_learning"]
+        self.online_train_seed = self.config["environment"]["online_train_seed"]
+        self.test_seed = self.config["environment"]["test_seed"]
         self.state = None
         self.reward = 0
+        self.accumulated_reward = 0
         self.done = False
         self.drone = Drone(self.config)  # 创建 Drone 实例
         self.data_collector = DataCollector()
@@ -30,7 +35,22 @@ class Environment:
         self.episode_count = 0
         self.initial_environment = self._generate_initial_environment()  # 初始环境的副本
         self.max_num_signal_points = 0
+        
+        if self.online_learning:
+            # 设置NumPy的随机种子
+            np.random.seed(self.online_train_seed)
+            # 设置Python标准库随机模块的种子
+            random.seed(self.online_train_seed)
+            torch.manual_seed(self.online_train_seed)
+            torch.cuda.manual_seed_all(self.online_train_seed)  # 如果使用多个CUDA设备
 
+        else:
+            # 设置NumPy的随机种子
+            np.random.seed(self.test_seed)
+            # 设置Python标准库随机模块的种子
+            random.seed(self.test_seed)
+            torch.manual_seed(self.online_train_seed)
+            torch.cuda.manual_seed_all(self.online_train_seed)  # 如果使用多个CUDA设备
 
     def set_state(self, state):
         self.state = state
@@ -54,6 +74,7 @@ class Environment:
                 'collected_points': 0
             }
             self.num_signal_points = np.sum(self.state['global_matrix'] == 1)
+            self.max_num_signal_points = self.num_signal_points
         else:
             environment = self._generate_initial_environment()
             if self.state is None:
@@ -69,7 +90,7 @@ class Environment:
         self.drone.reset(self._is_valid_position)
         self.reward = 0
         self.done = False
-        self.data_collector.reset()
+        # self.data_collector.reset()
         self.state['drone_position'] = self.drone.position
         self.state['local_matrix'] = self._get_local_matrix()
         self.state['battery'] = self.drone.battery
@@ -213,12 +234,13 @@ class Environment:
     def _update_drone_position(self, action):
         # 使用 Drone 类的方法来更新无人机位置
         reward = self.drone.update_position(action, self.state, self._is_valid_position, self._calculate_reward)
-        self.reward += reward  # 更新累积奖励
+        self.reward = reward  # 更新奖励
+        self.accumulated_reward += reward  # 累积奖励
 
     def _update_state(self):
         
         self.state['battery'] = self.drone.battery
-        
+        self.state['drone_position'] = self.drone.position
         # 更新局部矩阵，如果有必要的话
         self.state['local_matrix'] = self._get_local_matrix()
         self.num_signal_points = np.sum(self.state['global_matrix'] == 1)
@@ -227,15 +249,34 @@ class Environment:
         # 使用 Drone 类的方法来获取局部矩阵
         return self.drone.get_local_matrix(self.state, self.config['environment']['perception_range'])
 
+    # 奖励函数设计模块
+
     def calculate_efficiency_reward(self):
-        # 根据剩余电量和收集到的信息点数量计算效率奖励
-        if self.state['collected_points'] == self.max_num_signal_points:
-            # 所有信息点都被收集时，给予额外奖励
-            return self.state['battery'] * self.config['penalties_rewards']['efficiency_multiplier']
-        return 0
+        progress = self.state['collected_points'] / self.max_num_signal_points
+        smooth_factor = min(1, progress * 2)  # 当进度小于50%时，平滑效率奖励
+        efficiency_reward = (self.state['battery'] / self.config['drone']['battery']) * self.config['penalties_rewards']['efficiency_multiplier'] * progress * smooth_factor
+        return efficiency_reward
+
+    def calculate_dynamic_reward(self, action_result):
+        # 动态调整奖励
+        if action_result == 'collect_success':
+            collected_points = self.state['collected_points']
+            # 随着收集到的信息点增加，奖励递增
+            dynamic_reward = self.config['penalties_rewards']["target_reward"] * (collected_points / self.max_num_signal_points)
+        else:
+            dynamic_reward = 0
+        return dynamic_reward
+
+    def calculate_long_term_reward(self):
+        if self.state['collected_points'] > 0:
+            efficiency = self.state['collected_points'] / (self.config['drone']['battery'] - self.state['battery'] + 1)  # 避免除以零
+            long_term_reward = min(efficiency, self.config['penalties_rewards']['max_efficiency']) * self.config['penalties_rewards']['long_term_multiplier']
+        else:
+            long_term_reward = 0
+        return long_term_reward
 
     def _calculate_reward(self, action_result):
-        # Define the rewards for different action results
+        # 定义不同动作结果的奖励
         rewards = {
             'collect_success': self.config['penalties_rewards']["target_reward"],
             'collect_fail': -self.config['penalties_rewards']["invalid_action_penalty"],
@@ -243,21 +284,32 @@ class Environment:
             'valid_move': -self.config['penalties_rewards']["default_penalty"]
         }
         reward = rewards.get(action_result, 0)
+
+        # 添加效率奖励、动态奖励和长期奖励
         efficiency_reward = self.calculate_efficiency_reward()
-        return reward + efficiency_reward
+        dynamic_reward = self.calculate_dynamic_reward(action_result)
+        long_term_reward = self.calculate_long_term_reward()
 
-    def _check_done(self):
-        # Check if the drone's battery is depleted
-        if self.drone.battery <= 0 or self.num_signal_points == 0:
-            # self.data_collector.save_data(self.mcts_path)
-            self.done = True
+        return reward + efficiency_reward + dynamic_reward + long_term_reward
 
-            # 展示当前状态
-            print(f"State: {self.state}, Reward: {self.reward}, Done: {self.done}")
+    # 结束模块
+
+    def _check_done(self, state=None):
+        if state is None:
+            # Check if the drone's battery is depleted
+            if self.drone.battery <= 0 or self.num_signal_points == 0:
+                # self.data_collector.save_data(self.mcts_path)
+                self.done = True
+                # 展示当前状态
+                print(f"State: {self.state}, Reward: {self.accumulated_reward}, Done: {self.done}")
+                self.accumulated_reward=0
+            else:
+                self.done = False
+            return self.done
         else:
-            self.done = False
-        
-        return self.done
+            if state['battery'] <= 0 or state['collected_points'] == self.max_num_signal_points:
+                return True
+            return False
 
 if __name__ == "__main__":
     config_path = 'config/config.yml'
