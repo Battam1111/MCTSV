@@ -19,18 +19,13 @@ class Environment:
         with open(config_path, 'r') as file:
             self.config = yaml.safe_load(file)
 
-        self.mcts = MCTS(self, num_simulations=self.config['mcts']['num_simulations'])
         self.online_learning = self.config["training"]["online_learning"]
         self.online_train_seed = self.config["environment"]["online_train_seed"]
         self.test_seed = self.config["environment"]["test_seed"]
         self.state = None
-        self.reward = 0
-        self.accumulated_reward = 0
-        self.done = False
         self.drone = Drone(self.config)  # 创建 Drone 实例
         self.data_collector = DataCollector()
         self.is_simulated = False
-        self.num_signal_points = 0
         self.num_obstacles = 0
         self.episode_count = 0
         self.initial_environment = self._generate_initial_environment()  # 初始环境的副本
@@ -54,8 +49,8 @@ class Environment:
 
     def set_state(self, state):
         self.state = state
-        self.drone_position = state['drone_position']
         self.drone.battery = state['battery']
+        self.drone.position = state['drone_position']
 
     def reset(self):
         if self.online_learning:
@@ -72,10 +67,13 @@ class Environment:
                 'local_matrix': None,
                 'battery': None,
                 'collected_points': 0,
-                'action':None
+                'exist_signal_points': 0,
+                'action':None,
+                'reward': 0,
+                'accumulated_reward': 0,
+                'done': False
             }
-            self.num_signal_points = np.sum(self.state['global_matrix'] == 1)
-            self.max_num_signal_points = self.num_signal_points
+
         else:
             environment = self._generate_initial_environment()
             if self.state is None:
@@ -85,17 +83,21 @@ class Environment:
                     'local_matrix': None,
                     'battery': None,
                     'collected_points': 0,
-                    'action':None
+                    'exist_signal_points': 0,
+                    'action':None,
+                    'reward': 0,
+                    'accumulated_reward': 0,
+                    'done': False
                 }
             
         # 共用的重置逻辑
         self.drone.reset(self._is_valid_position)
-        self.reward = 0
-        self.done = False
         # self.data_collector.reset()
         self.state['drone_position'] = self.drone.position
         self.state['local_matrix'] = self._get_local_matrix()
         self.state['battery'] = self.drone.battery
+        self.state['exist_signal_points'] = np.sum(self.state['global_matrix'] == 1)
+        self.max_num_signal_points = self.state['exist_signal_points']
         self.episode_count += 1
         
         return self.state
@@ -105,13 +107,15 @@ class Environment:
         self.visualizer.start_animation()
 
     def step(self, global_flow_model, local_flow_model, mcts_vnet_model=None, action=None, use_mcts=False, is_simulated=False, use_mcts_to_train=False, use_mcts_vnet_value=False):
-        if self.done:
+        if self.state['done']:
             # 如果环境已完成，直接返回当前状态、奖励和完成标志
-            return self.state, self.reward, self.done
+            return self.state, self.state['reward'], self.state['done']
 
         if use_mcts and not is_simulated:
+            mcts = MCTS(copy.deepcopy(self), num_simulations=self.config['mcts']['num_simulations'])
             # 使用 MCTS 算法来获取最佳动作
-            action = self.mcts.search(self.state, mcts_vnet_model, global_flow_model, local_flow_model, use_mcts_vnet_value)
+            action = mcts.search(copy.deepcopy(self.state), mcts_vnet_model, global_flow_model, local_flow_model, use_mcts_vnet_value)
+            del mcts  # 删除 MCTS 实例，以便下一次重新创建
 
         if type(action) != tuple:
             action = self.drone.available_actions_dict[action]
@@ -128,18 +132,22 @@ class Environment:
             'local_matrix': self.state['local_matrix'],
             'battery': self.drone.battery,
             'collected_points': self.state['collected_points'],
-            'action': action
+            'action': action,
+            'reward': self.state['reward'],
+            'accumulated_reward':self.state['accumulated_reward'],
+            'done': self.state['done']
         }
+        state_dict['exist_signal_points'] = np.sum(self.state['global_matrix'] == 1)
 
         # 使用 MCTS 模拟从当前状态出发的一系列动作，并获取累积回报，当已经在模拟时则跳过
         if not is_simulated and use_mcts_to_train:
-            cumulative_reward = self.mcts.simulate(Node(state_dict), global_flow_model=global_flow_model, local_flow_model=local_flow_model)
-
+            mcts = MCTS(copy.deepcopy(self), num_simulations=self.config['mcts']['num_simulations'])
+            cumulative_reward = mcts.simulate(Node(state_dict), global_flow_model=global_flow_model, local_flow_model=local_flow_model)
 
         # 展示当前状态
-        # print(f"State: {state_dict}, Reward: {self.reward}, Done: {self.done}")
+        # print(f"State: {state_dict}")
 
-        return state_dict, self.reward, self.done
+        return state_dict, state_dict['reward'], state_dict['done']
 
     def micro_adjust_environment(self):
         size = self.config['environment']['size']
@@ -149,7 +157,7 @@ class Environment:
         temp_environment = copy.deepcopy(self.initial_environment)
         
         # 计算需要调整的信号点和障碍物数量
-        num_adjustments = max(1, int((self.num_signal_points + self.num_obstacles) * adjustment_factor))
+        num_adjustments = max(1, int((self.state['exist_signal_points'] + self.num_obstacles) * adjustment_factor))
         
         # 随机选择信号点和障碍物进行移动
         for _ in range(num_adjustments):
@@ -182,7 +190,7 @@ class Environment:
 
         # 更新初始环境
         self.initial_environment = temp_environment
-        self.num_signal_points = np.sum(temp_environment == 1)
+        self.state['exist_signal_points'] = np.sum(temp_environment == 1)
 
     def _generate_initial_environment(self):
         size = self.config['environment']['size']
@@ -198,8 +206,6 @@ class Environment:
         environment = np.zeros((size, size))
         num_signal_points = np.random.randint(min_num_signal_points, max_num_signal_points + 1)
         num_obstacles = np.random.randint(min_num_obstacles, max_num_obstacles + 1)
-        
-        self.num_signal_points = num_signal_points
         self.max_num_signal_points = num_signal_points # 用于计算效率奖励
         self.num_obstacles = num_obstacles
 
@@ -219,8 +225,6 @@ class Environment:
             else:
                 environment[position] = -1
         
-        # 确保最终环境反映正确的信号点和障碍物数量
-        self.num_signal_points = np.sum(environment == 1)
         self.num_obstacles = np.sum(environment == -1)
 
         return environment
@@ -235,16 +239,16 @@ class Environment:
     def _update_drone_position(self, action):
         # 使用 Drone 类的方法来更新无人机位置
         reward = self.drone.update_position(action, self.state, self._is_valid_position, self._calculate_reward)
-        self.reward = reward  # 更新奖励
-        self.accumulated_reward += reward  # 累积奖励
+        self.state['exist_signal_points'] = np.sum(self.state['global_matrix'] == 1)
+        self.state['reward'] = reward  # 更新奖励
+        self.state['accumulated_reward'] += reward  # 累积奖励
 
     def _update_state(self):
         
         self.state['battery'] = self.drone.battery
         self.state['drone_position'] = self.drone.position
-        # 更新局部矩阵，如果有必要的话
         self.state['local_matrix'] = self._get_local_matrix()
-        self.num_signal_points = np.sum(self.state['global_matrix'] == 1)
+        self.state['exist_signal_points'] = np.sum(self.state['global_matrix'] == 1)
 
     def _get_local_matrix(self):
         # 使用 Drone 类的方法来获取局部矩阵
@@ -298,17 +302,17 @@ class Environment:
     def _check_done(self, state=None, is_simulated=False):
         if state is None:
             # Check if the drone's battery is depleted
-            if self.drone.battery <= 0 or self.num_signal_points == 0:
+            if self.drone.battery <= 0 or self.state['exist_signal_points'] == 0:
                 # self.data_collector.save_data(self.mcts_path)
-                self.done = True
+                self.state['done'] = True
                 # 展示当前状态
-                print(f"State: {self.state}, Reward: {self.accumulated_reward}, Done: {self.done}, Simulated: {is_simulated}")
-                self.accumulated_reward=0
+                print(f"State: {self.state}, Simulated: {is_simulated}")
+                self.state['accumulated_reward']=0
             else:
-                self.done = False
-            return self.done
+                self.state['done'] = False
+            return self.state['done']
         else:
-            if state['battery'] <= 0 or state['collected_points'] == self.max_num_signal_points:
+            if state['battery'] <= 0 or self.state['exist_signal_points'] == 0:
                 return True
             return False
 

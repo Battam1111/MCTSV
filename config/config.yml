@@ -18,7 +18,7 @@ environment:
   test_seed: 2024
 
 mcts:
-  num_simulations: 9
+  num_simulations: 10
   c_puct: 1.0
 
 drone:

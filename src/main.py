@@ -134,7 +134,6 @@ class SimulationManager:
             # 创建Experience对象
             experience = Experience((global_flow_output.detach().cpu().numpy(), local_matrix.detach().cpu().numpy()), action, normalized_reward, (next_global_flow_output.detach().cpu().numpy(), next_local_matrix.detach().cpu().numpy()), done)
 
-            
             # 使用单个Experience对象作为参数调用push方法
             self.replay_buffer.push(experience)
             
@@ -162,12 +161,6 @@ class SimulationManager:
         # 解包states和next_states，因为它们是由两个不同大小的tensor组成的元组
         global_states, local_states = states[0], states[1]
         global_next_states, local_next_states = next_states[0], next_states[1]
-
-        # 将每个states部分转换为合适的torch tensors并移至设备，分离计算图
-        # global_states = torch.stack(global_states).to(self.device).detach()
-        # local_states = torch.stack(local_states).to(self.device).detach()
-        # global_next_states = torch.stack(global_next_states).to(self.device).detach()
-        # local_next_states = torch.stack(local_next_states).to(self.device).detach()
         
         global_states = global_states.to(self.device).detach()
         local_states = local_states.to(self.device).detach()

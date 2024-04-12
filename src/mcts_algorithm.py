@@ -16,35 +16,68 @@ class Node:
         self.value = 0
         self.depth = depth
         self.action_values = defaultdict(float)
-        self.untried_actions = env.drone._generate_available_actions()[0] if parent is None else parent.untried_actions[:]
-        self.c_param = c_param
+        self.untried_actions = set(env.drone._generate_available_actions()[0]) if parent is None else parent.untried_actions.copy()
+        self.c_param = c_param  # 初始探索参数
         self.ucb_score = float('inf')
-        self.total_log_parent_visits = np.log(1)  # 初始化为对1取对数
-
-    def update_ucb_log_terms(self):
-        if self.parent:
-            self.total_log_parent_visits = np.log(self.parent.visits + 1)  # 父节点访问次数更新时调用
+        self.total_log_parent_visits = np.log(1)
 
     def calculate_ucb_score(self, child):
         """
-        使用缓存的对数值计算UCB分数
+        根据当前的访问次数和探索参数动态计算UCB分数。
         """
-        exploitation = child.value / (child.visits + 1e-5)
-        exploration = self.c_param * np.sqrt(self.total_log_parent_visits / (child.visits + 1e-5))
+        if child.visits == 0:
+            return float('inf')  # 未访问的节点优先探索
+
+        self.update_parent_visits_log()  # 更新缓存
+        exploitation = child.value / child.visits
+        exploration = self.c_param * np.sqrt(self.total_log_parent_visits / child.visits)
         return exploitation + exploration
 
-    def dispose(self):
-        # Explicitly disposes of node resources and references to assist with garbage collection
-        self.state = None
-        self.env = None
-        if self.children:
-            for child in self.children.values():
-                child.dispose()  # Ensure child nodes are also disposed
-        self.parent = None
-        self.action = None
-        self.children.clear()
-        self.action_values.clear()
-        self.untried_actions = None
+    def dynamic_c_param(self):
+        """
+        动态调整c_param基于节点深度和其他可能因素。
+        """
+        # 示例：随深度增加而减少c_param以鼓励更深层的利用
+        return max(0.1, self.c_param * 0.95 ** self.depth)
+
+    def update(self, reward):
+        """
+        使用动态调整的alpha更新节点的价值。
+        """
+        self.visits += 1
+        alpha = 1 / self.visits
+        self.value += alpha * (reward - self.value)
+        if self.action is not None:
+            self.action_values[self.action] += alpha * (reward - self.action_values[self.action])
+
+        # 动态调整探索参数
+        if self.parent:
+            self.parent.update(reward)
+            self.parent.c_param = self.parent.dynamic_c_param()  # 更新探索参数
+            self.parent.update_parent_visits_log()
+
+    def add_child(self, state, action):
+        """
+        Adds a new child node for the given state and action.
+        Optimized to manage untried actions using set for efficiency.
+        """
+        new_node = Node(state, self.env, self, action, self.depth + 1)
+        self.children[action] = new_node
+        # 优化：使用集合移除动作，更高效
+        self.untried_actions.discard(action)
+        return new_node
+
+    def is_fully_expanded(self):
+        """
+        Checks if this node has expanded all possible actions.
+        Optimized by checking if untried_actions is empty.
+        """
+        return not self.untried_actions
+
+    def update_parent_visits_log(self):
+        if self.parent:
+            # 确保每次计算UCB分数前父节点的访问次数对数是最新的
+            self.total_log_parent_visits = np.log(self.parent.visits + 1)
 
     def importance(self):
         """
@@ -60,48 +93,7 @@ class Node:
             return 0
         child_values = np.array([child.value for child in self.children])
         return np.std(child_values)
-
-    def add_child(self, state, action):
-        """
-        Adds a new child node for the given state and action.
-        Updates the list of untried actions dynamically.
-        """
-        new_node = Node(state, self.env, self, action, self.depth + 1)
-        self.children[action] = new_node  # 使用动作作为键存储子节点
-        self.untried_actions = [act for act in self.untried_actions if act != action]
-        return new_node
-
-    def update(self, reward):
-        self.visits += 1
-        alpha = 1 / self.visits
-        self.value += alpha * (reward - self.value)
-        if self.action is not None:
-            self.action_values[self.action] += alpha * (reward - self.action_values[self.action])
-        
-        # 更新父节点并刷新UCB相关的缓存值
-        if self.parent:
-            self.parent.update(reward)
-            self.parent.update_ucb_log_terms()
-
-
-    def is_fully_expanded(self):
-        """
-        Checks if this node has expanded all possible actions.
-        """
-        # 检查是否所有可能的动作都有对应的子节点
-        return set(self.untried_actions).issubset(self.children.keys())
     
-    def mark_for_recycling(self):
-        """
-        Marks this node and its subtree for recycling.
-        """
-        self.state = None
-        self.env = None
-        self.parent = None
-        self.action = None
-        self.children = None
-        self.action_values = None
-        self.untried_actions = None
 
 class MCTS:
     """
@@ -109,13 +101,11 @@ class MCTS:
     This implementation focuses on efficiency, readability, and flexibility.
     """
     
-    def __init__(self, environment, num_simulations, depth_threshold=10, recycling_threshold=1000, time_limit=500, convergence_threshold=10):
-        self.environment = copy.deepcopy(environment)
+    def __init__(self, environment, num_simulations, depth_threshold=10, time_limit=500, convergence_threshold=10):
+        self.environment = environment
         self.num_simulations = num_simulations
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.depth_threshold = depth_threshold  # 深度阈值
-        self.recycling_threshold = recycling_threshold  # 节点回收阈值
-        self.recycling_counter = 0  # 回收计数器
         self.time_limit = time_limit  # 时间限制
         self.convergence_threshold = convergence_threshold  # 收敛阈值
     
@@ -137,25 +127,10 @@ class MCTS:
         
         # 确保至少执行一次模拟
         return max(1, self.num_simulations + additional_simulations)
-    
-    def _recycle_nodes(self, node):
-        if node is None:
-            return
-        # Recursively dispose of children nodes
-        for child in list(node.children.values()):
-            self._recycle_nodes(child)
-        node.dispose()  # Call dispose to free resources
-        self.recycling_counter += 1
-        # Force garbage collection if threshold is exceeded
-        if self.recycling_counter >= self.recycling_threshold:
-            import gc
-            gc.collect()
-            self.recycling_counter = 0
 
-    def best_child(self, node_ref, c_param=1.4, LARGE_VALUE=-float('inf'), return_default=False):
-        node = node_ref
-        if node is None:
-            return None
+    def best_child(self, node, LARGE_VALUE=-float('inf'), return_default=False):
+        if node is None or not node.children:
+            return None if not return_default else Node(node.state, self.environment)  # 提供默认行为或返回 None
 
         best_action = None
         best_ucb_score = LARGE_VALUE
@@ -165,11 +140,12 @@ class MCTS:
                 best_ucb_score = ucb_score
                 best_action = action
 
-        return node.children.get(best_action, None if not return_default else Node(node.state, self.environment))
-
+        return node.children.get(best_action)
     
     def _simulate(self, node, mcts_vnet_model, global_flow_model, local_flow_model, use_mcts_vnet_value=False):
-        
+        # 保存环境的初始状态
+        initial_state = copy.deepcopy(self.environment.state)
+
         simulation_env = copy.deepcopy(self.environment)
         simulation_env.is_simulated = True
         simulation_env.set_state(node.state)
@@ -196,57 +172,54 @@ class MCTS:
                 _, reward, done = simulation_env.step(action=action, global_flow_model=global_flow_model, local_flow_model=local_flow_model, is_simulated=True)
                 total_reward += reward
         
+            # 恢复环境的初始状态
+            self.environment.set_state(initial_state)
+        
         return total_reward
     
     def _search(self, state, mcts_vnet_model, global_flow_model, local_flow_model, use_mcts_vnet_value):
         self.root_node = Node(state, self.environment)
-        self.root_node.update_ucb_log_terms()  # 初始化根节点的对数缓存
         num_simulations = self.adaptive_num_simulations(self.root_node)
-        
-        # 保存环境的初始状态
+
         initial_state = copy.deepcopy(self.environment.state)
-        
         start_time = time.time()
         best_action = None
         best_action_stable_count = 0
-        
-        for _ in range(num_simulations):
-            node = self.root_node
 
-            if node.depth >= self.depth_threshold:
-                break
-            
-            if time.time() - start_time > self.time_limit:
-                break
-            
-            # Perform Selection
-            while node and node.is_fully_expanded() and not self.environment._check_done(node.state):
+        for simulation_index in range(num_simulations):
+            node = self.root_node  # 总是从根节点开始
+            path = [node]  # 初始化路径
+
+            # Selection: 寻找最佳子节点直至叶子节点
+            while node.is_fully_expanded() and node.children:
                 node = self.best_child(node)
-            
-            # Perform Expansion
-            if node and not node.is_fully_expanded():
-                action = node.untried_actions[0]
+                if node is None:
+                    break  # 如果没有子节点可选，则跳出循环
+                path.append(node)
+
+            # Expansion: 如果节点未完全扩展且未达到结束状态，则创建新的子节点
+            if node and not node.is_fully_expanded() and not self.environment._check_done(node.state):
+                action = node.untried_actions.pop()
                 new_state, reward, done = self.environment.step(global_flow_model=global_flow_model, local_flow_model=local_flow_model, action=action, is_simulated=True)
-                # 恢复环境的初始状态
-                self.environment.set_state(initial_state)
+                self.environment.set_state(initial_state)  # 恢复环境的初始状态
                 if not done:
                     node = node.add_child(new_state, action)
-            
-            # Perform Simulation
-            if node and not self.environment._check_done(node.state):
+                    path.append(node)
+
+            # Simulation: 从当前节点模拟直到游戏结束
+            reward = 0
+            if node:
                 reward = self._simulate(node=node, mcts_vnet_model=mcts_vnet_model, global_flow_model=global_flow_model, local_flow_model=local_flow_model, use_mcts_vnet_value=use_mcts_vnet_value)
             
-                # Perform Backpropagation
-                while node is not None:
-                    current_node = node
-                    if current_node is None:
-                        break
-                    current_node.update(reward)
-                    node = current_node.parent
-            
-            # Check if the best action is stable
+            # Backpropagation: 回传更新所有经过的节点
+            for node in reversed(path):
+                node.update(reward)
+                if node.parent:
+                    node.parent.update_parent_visits_log()
+
+            # 检查最佳动作是否稳定
             best_child_node = self.best_child(self.root_node, return_default=False)
-            current_best_action = best_child_node.action if best_child_node is not None else None
+            current_best_action = best_child_node.action if best_child_node else None
             if current_best_action == best_action:
                 best_action_stable_count += 1
                 if best_action_stable_count >= self.convergence_threshold:
@@ -254,17 +227,15 @@ class MCTS:
             else:
                 best_action = current_best_action
                 best_action_stable_count = 0
-                
-        if best_action is None and self.root_node.untried_actions:
-            best_action = self.root_node.untried_actions[0]
-        else:
-            # 所有动作都已尝试，选择具有最高价值的子节点对应的动作
-            best_child_node = max(self.root_node.children.values(), key=lambda child: child.value, default=None)
-            best_action = best_child_node.action if best_child_node is not None else None
 
-        # After search, clean up all nodes to prevent memory leak
-        self._recycle_nodes(self.root_node)
-        self.root_node = None  # Remove reference to root node
+            # 检查时间限制
+            if time.time() - start_time > self.time_limit:
+                break
+
+        # 如果没有有效的动作被选择，尝试返回具有最高价值的子节点的动作
+        if best_action is None:
+            best_child_node = max(self.root_node.children.values(), key=lambda child: child.value, default=None)
+            best_action = best_child_node.action if best_child_node else None
         
         return best_action
 
