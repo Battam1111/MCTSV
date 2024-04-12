@@ -87,6 +87,8 @@ class Drone:
 
             reward = calculate_reward('collect_success') if collected else calculate_reward('collect_fail')
 
+        # 默认扣除agent电量
+        self.battery -= self.config['penalties_rewards']["default_battery_penalty"]
         return reward
 
 
@@ -120,6 +122,12 @@ class Drone:
         moves = [(dx, dy) for dx in range(-max_speed, max_speed + 1) for dy in range(-max_speed, max_speed + 1) if (dx, dy) != (0, 0)]
         actions = [('move', move) for move in moves] + [('collect', None)]
         num_action = len([('move', move) for move in moves] + [('collect', None)])
+        
+        # 动作字典1，用于将动作转换为索引
+        self.available_actions_dict_inv = {action: i for i, action in enumerate(actions)}
+        # 动作字典2，用于将索引转换为动作
+        self.available_actions_dict = {i: action for i, action in enumerate(actions)}
+        
         return actions, num_action
 
 

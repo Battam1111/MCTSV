@@ -18,7 +18,7 @@ environment:
   test_seed: 2024
 
 mcts:
-  num_simulations: 20
+  num_simulations: 9
   c_puct: 1.0
 
 drone:
@@ -33,6 +33,7 @@ training:
   wandb: False
   use_mcts: True
   use_mcts_to_train: False
+  use_mcts_vnet_value: True
   checkpoint_interval: 100
   gamma: 0.99
   lambda_gae: 0.95  # GAE参数，一般介于0.9到0.99之间
@@ -41,16 +42,16 @@ training:
   episodes: 1000
   epochs: 1000
   lr: 0.00001  # 学习率
-  BATCH_SIZE: 1024
+  BATCH_SIZE: 128
   max_buffer: 16384
-  clip_grad: 0.1
+  clip_grad: 0.5
 
 penalties_rewards:
   invalid_action_penalty: 2  # 调整为更合适的范围
   collision_penalty: 5      # 碰撞惩罚，避免过度惩罚
   target_reward: 50           # 目标奖励，保持平衡
   default_penalty: 0.1       # 给予默认状态轻微惩罚，促使快速达成目标
-  default_battery_penalty: 1  # 统一行为成本
+  default_battery_penalty: 0.1  # 统一行为成本
   collect_info_cost: 1     # 信息收集成本
   move_cost: 1             # 移动成本
   max_efficiency: 1         # 最大效率
@@ -87,7 +88,7 @@ models:
     perception_range: 2
   mcts_vnet_model:
     input_dim: 10 
-    hidden_layers: [128, 256, 512, 1024, 512, 256, 128]
+    hidden_layers: [128, 256, 512, 256, 128]
     dropout: 0.6  
     available_actions: 9
     perception_range: 2

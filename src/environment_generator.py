@@ -71,7 +71,8 @@ class Environment:
                 'drone_position': None,
                 'local_matrix': None,
                 'battery': None,
-                'collected_points': 0
+                'collected_points': 0,
+                'action':None
             }
             self.num_signal_points = np.sum(self.state['global_matrix'] == 1)
             self.max_num_signal_points = self.num_signal_points
@@ -83,7 +84,8 @@ class Environment:
                     'drone_position': None,
                     'local_matrix': None,
                     'battery': None,
-                    'collected_points': 0
+                    'collected_points': 0,
+                    'action':None
                 }
             
         # 共用的重置逻辑
@@ -102,22 +104,22 @@ class Environment:
         self.visualizer = SimulationVisualizer(self)  # 将当前环境实例传给可视化器
         self.visualizer.start_animation()
 
-    def step(self, global_flow_model, local_flow_model, action=None, use_mcts=False, is_simulated=False, use_mcts_to_train=False):
+    def step(self, global_flow_model, local_flow_model, mcts_vnet_model=None, action=None, use_mcts=False, is_simulated=False, use_mcts_to_train=False, use_mcts_vnet_value=False):
         if self.done:
             # 如果环境已完成，直接返回当前状态、奖励和完成标志
             return self.state, self.reward, self.done
 
         if use_mcts and not is_simulated:
             # 使用 MCTS 算法来获取最佳动作
-            action = self.mcts.search(self.state, global_flow_model, local_flow_model)
+            action = self.mcts.search(self.state, mcts_vnet_model, global_flow_model, local_flow_model, use_mcts_vnet_value)
 
         if type(action) != tuple:
-            action = self.drone.available_actions[action]
+            action = self.drone.available_actions_dict[action]
 
         # 执行动作并更新环境状态
         self._update_drone_position(action)
         self._update_state()
-        self._check_done()
+        self._check_done(None, is_simulated)
 
         # 构建当前状态字典
         state_dict = {
@@ -125,15 +127,14 @@ class Environment:
             'drone_position': self.drone.position,
             'local_matrix': self.state['local_matrix'],
             'battery': self.drone.battery,
-            'collected_points': self.state['collected_points']
+            'collected_points': self.state['collected_points'],
+            'action': action
         }
 
         # 使用 MCTS 模拟从当前状态出发的一系列动作，并获取累积回报，当已经在模拟时则跳过
         if not is_simulated and use_mcts_to_train:
             cumulative_reward = self.mcts.simulate(Node(state_dict), global_flow_model=global_flow_model, local_flow_model=local_flow_model)
 
-            # 将当前状态和累积回报作为一对数据添加到 DataCollector 中
-            # self.data_collector.collect(state_dict, cumulative_reward)
 
         # 展示当前状态
         # print(f"State: {state_dict}, Reward: {self.reward}, Done: {self.done}")
@@ -294,14 +295,14 @@ class Environment:
 
     # 结束模块
 
-    def _check_done(self, state=None):
+    def _check_done(self, state=None, is_simulated=False):
         if state is None:
             # Check if the drone's battery is depleted
             if self.drone.battery <= 0 or self.num_signal_points == 0:
                 # self.data_collector.save_data(self.mcts_path)
                 self.done = True
                 # 展示当前状态
-                print(f"State: {self.state}, Reward: {self.accumulated_reward}, Done: {self.done}")
+                print(f"State: {self.state}, Reward: {self.accumulated_reward}, Done: {self.done}, Simulated: {is_simulated}")
                 self.accumulated_reward=0
             else:
                 self.done = False
