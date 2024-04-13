@@ -107,6 +107,8 @@ class Environment:
         self.visualizer.start_animation()
 
     def step(self, global_flow_model, local_flow_model, mcts_vnet_model=None, action=None, use_mcts=False, is_simulated=False, use_mcts_to_train=False, use_mcts_vnet_value=False):
+        
+        self._check_done(None, is_simulated)
         if self.state['done']:
             # 如果环境已完成，直接返回当前状态、奖励和完成标志
             return self.state, self.state['reward'], self.state['done']
@@ -301,18 +303,19 @@ class Environment:
 
     def _check_done(self, state=None, is_simulated=False):
         if state is None:
-            # Check if the drone's battery is depleted
-            if self.drone.battery <= 0 or self.state['exist_signal_points'] == 0:
-                # self.data_collector.save_data(self.mcts_path)
+            # 增加判断done的条件
+            if self.state['battery'] < 0.1 or self.state['exist_signal_points'] == 0:
                 self.state['done'] = True
-                # 展示当前状态
-                print(f"State: {self.state}, Simulated: {is_simulated}")
+                if not is_simulated:
+                    # 展示实际终局状态
+                    print(f"State: {self.state}")
                 self.state['accumulated_reward']=0
             else:
                 self.state['done'] = False
             return self.state['done']
         else:
-            if state['battery'] <= 0 or self.state['exist_signal_points'] == 0:
+            if state['battery'] < 0.1 or self.state['exist_signal_points'] == 0:
+                self.state['accumulated_reward']=0
                 return True
             return False
 

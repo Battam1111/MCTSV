@@ -118,7 +118,10 @@ class SimulationManager:
             # use_mcts_to_train为True时，获取存在返回状态字典中的action，然后转换为index
             if self.config['training']["use_mcts"]:
                 action = next_state['action']
-                action = self.env.drone.available_actions_dict_inv[action]
+                if action is None:
+                    pass
+                else:
+                    action = self.env.drone.available_actions_dict_inv[action]
             
             # 下一状态（mctsv模型输入的处理）
             next_global_matrix = torch.tensor(next_state['global_matrix'], dtype=torch.float).to(self.device)

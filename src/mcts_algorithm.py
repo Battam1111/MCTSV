@@ -128,9 +128,17 @@ class MCTS:
         # 确保至少执行一次模拟
         return max(1, self.num_simulations + additional_simulations)
 
-    def best_child(self, node, LARGE_VALUE=-float('inf'), return_default=False):
+    def best_child(self, node, LARGE_VALUE=-float('inf'), return_default=True):
+        """
+        Enhanced to handle edge cases where no children exist but a default action is necessary.
+        """
         if node is None or not node.children:
-            return None if not return_default else Node(node.state, self.environment)  # 提供默认行为或返回 None
+            if return_default:
+                # 提供一个默认行动，可能是重复最后一个行动或一个特殊的行动
+                last_action = node.parent.action if node.parent else None
+                return last_action  # 可以设定为一个特定的默认行动
+            else:
+                return None
 
         best_action = None
         best_ucb_score = LARGE_VALUE
@@ -193,8 +201,8 @@ class MCTS:
             # Selection: 寻找最佳子节点直至叶子节点
             while node.is_fully_expanded() and node.children:
                 node = self.best_child(node)
-                if node is None:
-                    break  # 如果没有子节点可选，则跳出循环
+                if node is None or self.environment._check_done(node.state):
+                    break  # 如果没有子节点可选或已达终止状态，则跳出循环
                 path.append(node)
 
             # Expansion: 如果节点未完全扩展且未达到结束状态，则创建新的子节点
@@ -205,10 +213,13 @@ class MCTS:
                 if not done:
                     node = node.add_child(new_state, action)
                     path.append(node)
+                # 最终状态直接返回action作为best_action
+                else:
+                    best_action = action
 
             # Simulation: 从当前节点模拟直到游戏结束
             reward = 0
-            if node:
+            if node and not self.environment._check_done(node.state):
                 reward = self._simulate(node=node, mcts_vnet_model=mcts_vnet_model, global_flow_model=global_flow_model, local_flow_model=local_flow_model, use_mcts_vnet_value=use_mcts_vnet_value)
             
             # Backpropagation: 回传更新所有经过的节点
@@ -218,26 +229,23 @@ class MCTS:
                     node.parent.update_parent_visits_log()
 
             # 检查最佳动作是否稳定
-            best_child_node = self.best_child(self.root_node, return_default=False)
-            current_best_action = best_child_node.action if best_child_node else None
-            if current_best_action == best_action:
-                best_action_stable_count += 1
-                if best_action_stable_count >= self.convergence_threshold:
-                    break
-            else:
-                best_action = current_best_action
-                best_action_stable_count = 0
+            if self.root_node.children:
+                best_child_node = self.best_child(self.root_node, return_default=True)
+                current_best_action = best_child_node.action if best_child_node else None
+                if current_best_action == best_action:
+                    best_action_stable_count += 1
+                    if best_action_stable_count >= self.convergence_threshold:
+                        break
+                else:
+                    best_action = current_best_action
+                    best_action_stable_count = 0
 
             # 检查时间限制
             if time.time() - start_time > self.time_limit:
                 break
-
-        # 如果没有有效的动作被选择，尝试返回具有最高价值的子节点的动作
-        if best_action is None:
-            best_child_node = max(self.root_node.children.values(), key=lambda child: child.value, default=None)
-            best_action = best_child_node.action if best_child_node else None
         
         return best_action
+
 
     def search(self, initial_state, mcts_vnet_model, global_flow_model, local_flow_model, use_mcts_vnet_value=False):
         """
