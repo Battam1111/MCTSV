@@ -3,51 +3,73 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+import torch
+import torch.nn as nn
+import math
+
+class PositionalEncoding2D(nn.Module):
+    def __init__(self, d_model, height, width, device='cuda:0'):
+        super(PositionalEncoding2D, self).__init__()
+        self.d_model = d_model
+        self.height = height
+        self.width = width
+        self.device = device
+
+        # 创建网格
+        y_position = torch.arange(height, device=device).unsqueeze(1).unsqueeze(2).repeat(1, width, 1)  # [height, width, 1]
+        x_position = torch.arange(width, device=device).unsqueeze(0).unsqueeze(2).repeat(height, 1, 1)  # [height, width, 1]
+
+        # 维度划分
+        half_dim = d_model // 4
+        div_term = torch.exp(torch.arange(0., half_dim, 2, device=device) * -(math.log(10000.0) / half_dim))  # [half_dim/2]
+
+        # 计算位置编码
+        pe = torch.zeros(height, width, d_model, device=device)
+        pe[:, :, 0:half_dim:2] = torch.sin(x_position * div_term)
+        pe[:, :, 1:half_dim:2] = torch.cos(x_position * div_term)
+        pe[:, :, half_dim:2*half_dim:2] = torch.sin(y_position * div_term)
+        pe[:, :, half_dim+1:2*half_dim:2] = torch.cos(y_position * div_term)
+
+        pe = pe.permute(2, 0, 1).unsqueeze(0)  # Permute to make it [1, d_model, height, width]
         self.register_buffer('pe', pe)
 
+
     def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
+        """
+        Args:
+            x: Tensor, shape [batch_size, d_model, height, width]
+        """
+        x = x + self.pe  # Add positional encoding to the input
         return x
 
 class CombinedNormActivation(nn.Module):
-    def __init__(self, normalized_shape=None, negative_slope=0.01, eps=1e-5):
+    def __init__(self, channels, negative_slope=0.01, eps=1e-5):
         super().__init__()
         self.eps = eps
         self.negative_slope = negative_slope
         self.leaky_relu = nn.LeakyReLU(negative_slope=negative_slope, inplace=True)
-        self.layer_norm = None
+        self.instance_norm = nn.InstanceNorm2d(channels, eps=self.eps, affine=True)
 
     def forward(self, x):
-        if self.layer_norm is None or self.layer_norm.normalized_shape[0] != x.size(-1):
-            self.layer_norm = nn.LayerNorm(x.size(-1), eps=self.eps).to(x.device)
-        x = self.layer_norm(x)
+        x = self.instance_norm(x)
         return self.leaky_relu(x)
 
 class EnhancedResidualBlock(nn.Module):
     def __init__(self, input_dim, output_dim, expansion=4, dropout_rate=0.1, norm_activation=None):
         super().__init__()
-        mid_dim = output_dim * expansion
+        mid_channels = int(output_dim * expansion)
+        self.adjust_dim = nn.Conv2d(input_dim, output_dim, kernel_size=(1, 1))
 
-        self.adjust_dim = nn.Sequential(
-            nn.Linear(input_dim, output_dim),
-            norm_activation
-        ) if input_dim != output_dim else nn.Identity()
+        # 确保 norm_activation 接收正确的 channels 参数
+        if norm_activation is None:
+            norm_activation = CombinedNormActivation(mid_channels)  # 这里使用 mid_channels 作为 channels
 
         self.layers = nn.Sequential(
             norm_activation,
-            nn.Linear(output_dim, mid_dim),
+            nn.Conv2d(output_dim, mid_channels, kernel_size=(3, 3), padding=1),
             norm_activation,
-            nn.Linear(mid_dim, output_dim),
-            nn.Dropout(dropout_rate)
+            nn.Conv2d(mid_channels, output_dim, kernel_size=(3, 3), padding=1),
+            nn.Dropout2d(dropout_rate)
         )
 
     def forward(self, x):
@@ -56,9 +78,8 @@ class EnhancedResidualBlock(nn.Module):
         out += residual
         return out
 
-
 class DynamicSparseAttention(nn.Module):
-    def __init__(self, num_heads=8, sparsity=0.1, device='cuda:0'):
+    def __init__(self, num_heads=4, sparsity=0.1, device='cuda:0'):
         super(DynamicSparseAttention, self).__init__()
         self.num_heads = num_heads
         self.sparsity = sparsity
@@ -90,6 +111,7 @@ class DynamicSparseAttention(nn.Module):
 
     def forward(self, x):
         x = x.to(self.device)
+        x = x.reshape(x.size(0), x.size(1), -1)
         batch_size, seq_length, dim = x.size()
         self._init_layers(dim)
         dim_key = str(dim)
@@ -99,6 +121,7 @@ class DynamicSparseAttention(nn.Module):
         attention_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
         k = max(int(attention_scores.size(-1) * self.sparsity), 1)
         threshold = torch.topk(attention_scores.view(-1, attention_scores.size(-1)), k=k, dim=-1)[0][..., -1, None]
+        print(threshold.shape)
         threshold = threshold.view(batch_size, self.num_heads, 1, 1)
         mask = attention_scores >= threshold
         masked_attention_scores = attention_scores.masked_fill(~mask, float('-inf'))
@@ -112,13 +135,13 @@ class DynamicSparseAttention(nn.Module):
         gate = gate.unsqueeze(1).expand(-1, x.size(1), -1)  # 扩展gate的维度以匹配attention_output
         return self.out[dim_key](gate * distilled_attention_output + (1 - gate) * attention_output)
 
-
 class GenericEncoderLayer(nn.Module):
-    def __init__(self, input_dim, output_dim, expansion, dropout_rate, negative_slope, eps, shared_attention, shared_norm_activation):
+    def __init__(self, input_dim, output_dim, num_heads, dropout_rate, expansion, sparsity, negative_slope, eps, shared_attention, shared_norm_activation):
         super().__init__()
+        # Ensure the norm_activation is properly configured
         norm_activation = shared_norm_activation if shared_norm_activation is not None else CombinedNormActivation(output_dim, negative_slope, eps)
         self.residual_block = EnhancedResidualBlock(input_dim, output_dim, expansion, dropout_rate, norm_activation)
-        self.attention = shared_attention if shared_attention is not None else DynamicSparseAttention(output_dim)
+        self.attention = shared_attention if shared_attention is not None else DynamicSparseAttention(num_heads=num_heads, sparsity=sparsity)
 
     def forward(self, x):
         x = self.residual_block(x)
@@ -126,86 +149,100 @@ class GenericEncoderLayer(nn.Module):
         return x
 
 class EncoderBlock(nn.Module):
-    def __init__(self, input_dim, hidden_dims, num_heads, dropout_rate, expansion, sparsity, negative_slope, eps, shared_attention, shared_norm_activation, shared_positional_encoding):
+    def __init__(self, input_dim, hidden_dims, num_heads, dropout_rate, expansion, sparsity, negative_slope, eps, shared_attention, shared_norm_activation, positional_encoding):
         super().__init__()
-        # 2D可能效果更好，但是为了泛用性，这里使用1D卷积（因为任何维度的数据都可以展平成1维向量？）
-        self.input_adjustment = nn.Conv1d(input_dim, hidden_dims[0], kernel_size=1) if input_dim != hidden_dims[0] else nn.Identity()
-        self.positional_encoding = shared_positional_encoding if shared_positional_encoding is not None else PositionalEncoding(hidden_dims[0])
+        self.input_adjustment = nn.Conv2d(1, hidden_dims[0], kernel_size=(1, 1))
+        self.positional_encoding = positional_encoding if positional_encoding is not None else PositionalEncoding2D(hidden_dims[0])
+
         self.layers = nn.ModuleList()
         for i, dim in enumerate(hidden_dims):
             in_dim = hidden_dims[i - 1] if i > 0 else hidden_dims[0]
-            self.layers.append(GenericEncoderLayer(in_dim, dim, expansion, dropout_rate, negative_slope, eps, shared_attention, shared_norm_activation))
+            if shared_norm_activation is not None:
+                shared_norm_activation = CombinedNormActivation(dim)  # 确保此处传入的是正确的 channels 数
+            self.layers.append(GenericEncoderLayer(input_dim=in_dim, output_dim=dim, num_heads=num_heads, expansion=expansion, sparsity=sparsity, dropout_rate=dropout_rate, negative_slope=negative_slope, eps=eps, shared_attention=shared_attention, shared_norm_activation=shared_norm_activation))
 
     def forward(self, x):
-        if x.dim() == 2:
-            x = x.unsqueeze(1)
-        x = x.transpose(1, 2)
-        x = self.input_adjustment(x)
-        x = x.transpose(1, 2)
+        x = self.input_adjustment(x)  # x现在应该是[batch_size, channels, height, width]
         x = self.positional_encoding(x)
         for layer in self.layers:
             x = layer(x)
         return x
 
-
 class AttentionDecoder(nn.Module):
     def __init__(self, input_dim, output_dim, num_heads=8, dropout_rate=0.1, eps=1e-5, sparsity=0.1, shared_attention=None, shared_norm_activation=None):
         super().__init__()
-        self.dynamic_attention = shared_attention if shared_attention is not None else DynamicSparseAttention(input_dim, num_heads=num_heads, sparsity=sparsity)
+        self.dynamic_attention = shared_attention if shared_attention is not None else DynamicSparseAttention(num_heads=num_heads, sparsity=sparsity)
         self.combined_norm_activation = shared_norm_activation if shared_norm_activation is not None else CombinedNormActivation(output_dim, eps=eps)
         self.proj_layer = nn.Sequential(
             nn.Linear(input_dim, output_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout_rate)
         )
+        self.final_layer = nn.Linear(output_dim, 1)
     
     def forward(self, x):
         x = self.dynamic_attention(x)
         x = self.proj_layer(x)
         x = self.combined_norm_activation(x)
-        return x
+        value = self.final_layer(x)
+        return x, value
 
 class MCTSVNet(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # 共享层设定
+        global_height, global_width = config["environment_size"], config["environment_size"]
+        local_height, local_width = 2*config["perception_range"]+1, 2*config["perception_range"]+1
+
+        positional_encoding_global = PositionalEncoding2D(config["hidden_layers"][0], global_height, global_width)
+        positional_encoding_local = PositionalEncoding2D(config["hidden_layers"][0], local_height, local_width)
+
+        # 设置共享层
         if config["shared_attention"]:
             shared_attention = DynamicSparseAttention(num_heads=config["num_heads"], sparsity=config["sparsity"])
         else:
             shared_attention = None
         if config["shared_norm_activation"]:
-            shared_norm_activation = CombinedNormActivation((config["hidden_layers"][0],), config["negative_slope"], config["eps"])
+            shared_norm_activation = CombinedNormActivation(config["hidden_layers"][0], config["negative_slope"], config["eps"])
         else:
             shared_norm_activation = None
-        if config["shared_positional_encoding"]:
-            shared_positional_encoding = PositionalEncoding(config["hidden_layers"][0])
-        else:
-            shared_positional_encoding = None
+
         # 网络结构
         self.encoder_global = EncoderBlock(
-            config["environment_size"] ** 2, config["hidden_layers"], config["num_heads"],
+            1,
+            config["hidden_layers"], config["num_heads"],
             config["dropout"], config["expansion"], config["sparsity"],
-            config["negative_slope"], config["eps"], shared_attention, shared_norm_activation,
-            shared_positional_encoding
+            config["negative_slope"], config["eps"], shared_attention=shared_attention,
+            shared_norm_activation=shared_norm_activation,
+            positional_encoding=positional_encoding_global
         )
         self.encoder_local = EncoderBlock(
-            (2 * config["perception_range"] + 1) ** 2, config["hidden_layers"], config["num_heads"],
+            1,
+            config["hidden_layers"], config["num_heads"],
             config["dropout"], config["expansion"], config["sparsity"],
-            config["negative_slope"], config["eps"], shared_attention, shared_norm_activation,
-            shared_positional_encoding
+            config["negative_slope"], config["eps"], shared_attention=shared_attention,
+            shared_norm_activation=shared_norm_activation,
+            positional_encoding=positional_encoding_local
         )
         self.decoder = AttentionDecoder(
-            config["hidden_layers"][-1] * 2, config["available_actions"], config["num_heads"],
-            config["dropout"], config["eps"], config["sparsity"], shared_attention, shared_norm_activation
+            config["hidden_layers"][-1] * 2 * config["environment_size"] * config["environment_size"],  # 假设解码器需要一维输入
+            config["available_actions"], config["num_heads"],
+            config["dropout"], config["eps"], config["sparsity"],
+            shared_attention=shared_attention, shared_norm_activation=shared_norm_activation
         )
-        self.value_head = nn.Linear(config["hidden_layers"][-1] * 2, 1)
 
     def forward(self, global_flow_output, local_flow_output):
-        global_flow_output = global_flow_output.view(global_flow_output.size(0), -1)
-        local_flow_output = local_flow_output.view(local_flow_output.size(0), -1)
+        # 编码全局和局部信息
         encoded_global = self.encoder_global(global_flow_output)
         encoded_local = self.encoder_local(local_flow_output)
-        combined_output = torch.cat((encoded_global, encoded_local), dim=-1)
-        policy = F.softmax(self.decoder(combined_output), dim=-1)
-        value = self.value_head(combined_output)
+        
+        # 结合全局和局部编码输出，展平以适应解码器
+        combined_output = torch.cat((encoded_global.flatten(1), encoded_local.flatten(1)), dim=1)
+        
+        # 解码处理合并后的输出，调整以接收两个输出：输出张量x和预测的价值
+        output, value = self.decoder(combined_output)
+
+        # 将解码器的输出张量处理成策略，使用softmax进行归一化
+        policy = F.softmax(output, dim=1)
+        
+        # 返回策略和价值
         return policy, value

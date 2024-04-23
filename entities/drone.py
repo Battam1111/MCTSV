@@ -8,6 +8,7 @@ class Drone:
         self.config = config
         self.position = None
         self.battery = config['drone']['battery']
+        self.collisions = 0
         self.max_collect_range = config['drone']['max_collect_range']
         self.available_actions = self._generate_available_actions()[0]
         self.mcts_vnet_model = mcts_vnet_model  # 将 MCTSVNet 模型传入无人机类
@@ -28,12 +29,13 @@ class Drone:
             np.random.seed(self.test_seed)
             # 设置Python标准库随机模块的种子
             random.seed(self.test_seed)
-            torch.manual_seed(self.online_train_seed)
-            torch.cuda.manual_seed_all(self.online_train_seed)  # 如果使用多个CUDA设备
+            torch.manual_seed(self.test_seed)
+            torch.cuda.manual_seed_all(self.test_seed)  # 如果使用多个CUDA设备
 
     def reset(self, is_valid_position):
         self.position = self._find_initial_position(is_valid_position)
         self.battery = self.config['drone']['battery']
+        self.collisions = 0
 
     def _find_initial_position(self, is_valid_position):
     # Check if the initial position is specified in the config
@@ -65,6 +67,7 @@ class Drone:
                 self.battery -= self.config['penalties_rewards']["move_cost"]
                 reward = calculate_reward('valid_move')
             else:
+                self.collisions += 1
                 reward = calculate_reward('invalid_move')
 
         # Handle the collect action

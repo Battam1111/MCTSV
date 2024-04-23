@@ -210,7 +210,7 @@ class LocalFlowDataPreparer:
 
 if __name__ == '__main__':
     config_path = 'config/config.yml'
-    num_environments = 8192  # 生成4个环境
+    num_environments = 1024  # 生成4个环境
     output_dir = 'data/processed'  # 确保这个目录存在或代码中创建它
 
     # 实例化GlobalFlowDataPreparer并生成环境

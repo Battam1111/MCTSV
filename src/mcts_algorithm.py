@@ -213,7 +213,7 @@ class MCTS:
                 if not done:
                     node = node.add_child(new_state, action)
                     path.append(node)
-                # 最终状态直接返回action作为best_action
+                # 最终状态直接返回action作为best_action,不然会报错
                 else:
                     best_action = action
 

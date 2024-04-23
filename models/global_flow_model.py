@@ -29,23 +29,14 @@ class GlobalFlowModel(nn.Module):
 
     def forward(self, x):
         # 输入 x 的形状应为 (batch_size, seq_length, feature_size)
-        # print(x.shape)
         x = self.input_linear(x.view(1, -1))
-        # print(x.shape)
         x = self.transformer_encoder(x)
-        # print(x.shape)
         x = self.output_layer(x)
-        # print(x.shape)
         # 调整输出形状以匹配环境矩阵
         x = x.view(-1, self.config['environment_size'], self.config['environment_size'])
-        # print(x.shape)
         # 根据需要应用激活函数
         x = self.activation(x)
-        # print(x.shape)
         return x
-
-
-
 
 if __name__ == '__main__':
     # 读取配置文件

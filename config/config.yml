@@ -2,7 +2,7 @@ environment:
   size: 10
   resolution: 1
   min_num_signal_points: 10
-  max_num_signal_points: 30
+  max_num_signal_points: 20
   min_num_obstacles: 10
   max_num_obstacles: 20
   signal_weight: 1.0
@@ -13,9 +13,10 @@ environment:
   reset_interval: 200
   adjust_interval: 100
   adjustment_factor: 0.3
-  complexity_interval: 100
+  complexity_interval: 1000
   online_train_seed: 0
   test_seed: 2024
+  is_animation: False
 
 mcts:
   num_simulations: 10 # 模拟次数，至少大于动作空间大小，否则无法探索所有动作
@@ -23,15 +24,24 @@ mcts:
 
 drone:
   max_collect_range: 1
-  battery: 128
+  battery: 100
   max_speed: 1
-  # initial_position: [5,5]
+  # initial_position: [7,7]
+
+testing:
+  use_local_flow: False
+  random: False
+  wandb: True
+  use_mcts: False
+  use_mcts_to_train: False
+  use_mcts_vnet_value: True
+  episodes: 100
 
 training:
-  online_learning: True
+  online_learning: False
   use_local_flow: False
-  wandb: False
-  use_mcts: True
+  wandb: True
+  use_mcts: False
   use_mcts_to_train: False
   use_mcts_vnet_value: True
   checkpoint_interval: 100
@@ -42,13 +52,13 @@ training:
   episodes: 1000
   epochs: 1000
   lr: 0.00001  # 学习率
-  BATCH_SIZE: 128
-  max_buffer: 16384
-  clip_grad: 0.5
+  BATCH_SIZE: 300
+  max_buffer: 100000
+  clip_grad: 1
 
 penalties_rewards:
   invalid_action_penalty: 2  # 调整为更合适的范围
-  collision_penalty: 5      # 碰撞惩罚，避免过度惩罚
+  collision_penalty: 10      # 碰撞惩罚，避免过度惩罚
   target_reward: 50           # 目标奖励，保持平衡
   default_penalty: 0.1       # 给予默认状态轻微惩罚，促使快速达成目标
   default_battery_penalty: 0.1  # 统一行为成本
@@ -68,7 +78,7 @@ datasets:
     model_path: "saved_models/local_flow/local_flow_model_val_loss4.9445.pt"
   mcts:
     data_dir: "data/raw/all_state-value-pair_data.json"
-    model_path: "saved_models/mcts_vnet/mcts_vnet_episode0_step0_loss1.842281699180603.pt"
+    model_path: "saved_models/mcts_vnet/MCTSV-Train-memoryBATCH1024-1000Episodes/episode800_avgRewards254.77_loss28.56.pt"
     save_model_path: "saved_models/mcts_vnet/"
 
 models:
@@ -87,15 +97,15 @@ models:
     dropout: 0.1
     perception_range: 2
   mcts_vnet_model:
-    input_dim: 10 
-    hidden_layers: [128, 256, 512, 256, 128]
-    dropout: 0.6  
+    input_dim: 10
+    hidden_layers: [256, 512, 1024, 512, 256]
+    dropout: 0.3
     available_actions: 9
     perception_range: 2
     environment_size: 10
-    num_heads: 8  
-    sparsity: 0.1  
-    expansion: 4  
+    num_heads: 8
+    sparsity: 0.1
+    expansion: 4
     negative_slope: 0.01
     eps: 0.00001
     shared_attention: True
