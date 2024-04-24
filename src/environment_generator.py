@@ -238,12 +238,12 @@ class Environment:
     def _update_drone_position(self, action):
         # 使用 Drone 类的方法来更新无人机位置
         reward = self.drone.update_position(action, self.state, self._is_valid_position, self._calculate_reward)
+        self.state['action'] = action
         self.state['collisions'] = self.drone.collisions
         self.state['reward'] = reward  # 更新奖励
         self.state['accumulated_reward'] += reward  # 累积奖励
 
     def _update_state(self):
-        
         self.state['battery'] = self.drone.battery
         self.state['drone_position'] = self.drone.position
         self.state['local_matrix'] = self._get_local_matrix()

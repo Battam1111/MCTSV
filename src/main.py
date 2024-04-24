@@ -164,6 +164,9 @@ class SimulationManager:
                 mcts = MCTS(copy.deepcopy(self.env), num_simulations=self.config['mcts']['num_simulations'])
                 # 使用 MCTS 算法来获取最佳动作
                 action = mcts.search(copy.deepcopy(self.state), self.mcts_vnet_model, self.global_flow_model, self.local_flow_model, self.config['testing']["use_mcts_vnet_value"])
+                action = self.env.drone.available_actions_dict_inv[action]
+                # 测试时在线学习用到
+                policy, _ = self.mcts_vnet_model(global_flow_output, local_matrix)
             elif self.config['testing']['random']:
                 action = random.choice(self.env.drone.available_actions)
             else:
@@ -174,33 +177,37 @@ class SimulationManager:
             next_state, reward, done = self.env.step(action=action, use_mcts_to_train=self.config['testing']["use_mcts_to_train"], global_flow_model=self.global_flow_model, local_flow_model=self.local_flow_model)
             
             # 测试时在线学习
-            # 下一状态（mctsv模型输入的处理）
-            next_global_matrix = torch.tensor(next_state['global_matrix'], dtype=torch.float).to(self.device)
-            next_local_matrix = torch.tensor(next_state['local_matrix'], dtype=torch.float).to(self.device)
+            if self.config['testing']['online_learning']:
+                # 下一状态（mctsv模型输入的处理）
+                next_global_matrix = torch.tensor(next_state['global_matrix'], dtype=torch.float).to(self.device)
+                next_local_matrix = torch.tensor(next_state['local_matrix'], dtype=torch.float).to(self.device)
 
-            next_global_flow_output = self.global_flow_model(next_global_matrix)
-            # next_local_flow_output = self.local_flow_model(next_local_matrix)
+                next_global_flow_output = self.global_flow_model(next_global_matrix)
+                # next_local_flow_output = self.local_flow_model(next_local_matrix)
 
-            # 奖励标准化
-            normalized_reward = self.normalizer.normalize(reward)
-            episode_rewards.append(normalized_reward)
-            
-            # 创建Experience对象
-            experience = Experience((global_flow_output.detach().cpu().numpy(), local_matrix.detach().cpu().numpy()), action, normalized_reward, (next_global_flow_output.detach().cpu().numpy(), next_local_matrix.detach().cpu().numpy()), done)
+                # 奖励标准化
+                normalized_reward = self.normalizer.normalize(reward)
+                episode_rewards.append(reward)
+                
+                # 创建Experience对象
+                experience = Experience((global_flow_output.detach().cpu().numpy(), local_matrix.detach().cpu().numpy()), action, normalized_reward, (next_global_flow_output.detach().cpu().numpy(), next_local_matrix.detach().cpu().numpy()), done)
 
-            # 使用单个Experience对象作为参数调用push方法
-            self.replay_buffer.push(experience)
+                # 使用单个Experience对象作为参数调用push方法
+                self.replay_buffer.push(experience)
 
 
             self.state = next_state
             self.done = done
-            episode_rewards.append(reward)
+            episode_rewards.append(normalized_reward)
+            # 应该用这个，但可以之后重新跑一次
+            # episode_rewards.append(reward)
 
         # 测试时在线学习
-        # Sample experiences from the replay buffer to update the model
-        if len(self.replay_buffer) >= self.config["training"]["BATCH_SIZE"]:
-            states, actions, rewards, next_states, dones, weights, indices = self.replay_buffer.sample(self.config["training"]["BATCH_SIZE"])
-            self.update_model(states, actions, rewards, next_states, dones, weights, indices)
+        if self.config['testing']['online_learning']:
+            # Sample experiences from the replay buffer to update the model
+            if len(self.replay_buffer) >= self.config["training"]["BATCH_SIZE"]:
+                states, actions, rewards, next_states, dones, weights, indices = self.replay_buffer.sample(self.config["training"]["BATCH_SIZE"])
+                self.update_model(states, actions, rewards, next_states, dones, weights, indices)
 
         if self.config['environment']['is_animation']:
             self.env.visualizer.save_animation(filename=f'saved_animations/{self.run_name}/animation', episode=episode)

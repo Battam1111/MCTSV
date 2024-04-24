@@ -29,10 +29,11 @@ drone:
   # initial_position: [7,7]
 
 testing:
+  online_learning: True
   use_local_flow: False
   random: False
   wandb: True
-  use_mcts: False
+  use_mcts: True
   use_mcts_to_train: False
   use_mcts_vnet_value: True
   episodes: 100
